@@ -42,12 +42,12 @@
     "url": "git+https://github.com/eotsevych/axe-playwright-report.git"
   },
   "peerDependencies": {
-    "@playwright/test": ">=1.44.0",
-    "@axe-core/playwright": ">=4.10.0"
+    "@playwright/test": ">=1.60.0",
+    "@axe-core/playwright": ">=4.11.0"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.11.0",
-    "@playwright/test": "^1.56.1",
+    "@playwright/test": "^1.61.0",
     "@types/node": "^20.8.0",
     "dotenv": "^16.3.1",
     "typescript": "^5.2.2"
