@@ -74,6 +74,7 @@ With the config file it allows:
 - enable/disable scanning (default: `on`)
 - custom output directory (default: `axe-playwright-report`)
 - enable/disable screenshots capture (default: `off`)
+- enable/disable storing axe `passes` results (default: `on`)
 - filter rules by axe-core tags (default: `no filtering, all rules included`)
 - merge reports strategy (default: `best`)
     - `none` - keep all reports,
@@ -95,6 +96,7 @@ SCAN=on
 OUTPUT_DIR=custom-report-dir
 MERGE_STRATEGY=best
 SCREENSHOT=on
+INCLUDE_PASSES=on
 CUSTOM_REG_EXP='["^\/\w+-\w+-\w+\.html$", "\/([^\/]*-[^\/]*)"]'
 TAGS=wcag2a,wcag2aa
 WITH_RULES=color-contrast,image-alt
@@ -106,6 +108,7 @@ EXCLUDE='.main-content .footer'
 - `SCAN`: Set to `on` to enable scanning.
 - `OUTPUT_DIR`: Directory for report output (default: `axe-playwright-report`).
 - `SCREENSHOT`: Set to `on` to capture screenshots of issues.
+- `INCLUDE_PASSES`: Set to `off` to skip storing axe `passes` results in the report JSON. Passes are the largest and least-read part of a scan, so disabling them yields smaller report files and faster dashboard generation, at the cost of the "Passes" counts showing `0`. Default: `on`.
 - `TAGS`: Comma-separated list of axe-core tags to filter rules.
 - `WITH_RULES`: Comma-separated list of axe-core rule IDs to run.
 - `EXCLUDE_RULES`: Comma-separated list of axe-core rule IDs to exclude from running.
@@ -208,6 +211,18 @@ Below is an example of the generated dashboard report:
 
 ![Example Report Page](./assets/report_example_1.png)
 ![Example Report Page Expanded](./assets/report_example_2.png)
+
+## Development
+
+For contributors working on the library itself:
+
+```bash
+npm run build      # compile TypeScript to dist/ and copy buildReport.js
+npm run typecheck  # type-check the .ts sources (strict) and the .js sources (checkJs)
+npm test           # run the test suite with the built-in Node test runner
+```
+
+`npm run typecheck` and `npm test` also run on every push and pull request via CI. The tests use Node's built-in [`node:test`](https://nodejs.org/api/test.html) runner, so no extra dependencies are required (Node 18+).
 
 ## License
 
