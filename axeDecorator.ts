@@ -75,6 +75,12 @@ export function axeScan<This, Args extends any[], Return>() {
                         fs.mkdirSync(accessibilityConfig.outputDir, {recursive: true});
                     }
 
+                    // Drop passes from what we persist when disabled; the page is
+                    // still recorded (the membership check above already ran).
+                    if (!accessibilityConfig.includePasses) {
+                        accessibilityScanResults.passes = [];
+                    }
+
                     fs.writeFileSync(`${accessibilityConfig.outputDir}/${accessibilityScanResults['id']}.json`, JSON.stringify(accessibilityScanResults, null, 2));
 
                     if (accessibilityConfig.screenshots) {
@@ -114,11 +120,17 @@ function formatUrl(inputUrl: string): string {
 
 async function highlightEachIssuesAndSaveScreenshot(issues: any[], page: Page, color: string, fileName: string, outputDir: string) {
     for (let i = 0; i < issues.length; i++) {
+        // Resolve each target locator once and remember the handles we highlighted,
+        // so cleanup reuses them instead of re-querying every target a second time.
+        const highlighted: Locator[] = [];
+
         for (let j = 0; j < issues[i].nodes.length; j++) {
             for (let k = 0; k < issues[i].nodes[j].target.length; k++) {
                 try {
                     const element = (await page.locator(<string>issues[i].nodes[j].target[k]).all())[0]
+                    if (!element) continue;
                     await highlightElement(element, j, color);
+                    highlighted.push(element);
                 } catch (ignore: any) {
                 }
             }
@@ -126,31 +138,36 @@ async function highlightEachIssuesAndSaveScreenshot(issues: any[], page: Page, c
 
         await page.screenshot({path: `${outputDir}/${fileName}_${i + 1}.png`});
 
-        // Delete all highlighted elements for the current issue
-        for (let j = 0; j < issues[i].nodes.length; j++) {
-            for (let k = 0; k < issues[i].nodes[j].target.length; k++) {
-                try {
-                    const element = (await page.locator(<string>issues[i].nodes[j].target[k]).all())[0]
-                    await element.evaluate((el) => {
-                        el.style.outline = "none";
-                        const marker = el.querySelector(`[id^="marker-"]`);
-                        if (marker) {
-                            marker.textContent = "";
-                            marker.remove();
-                        }
-                    }, {timeout: 250});
-                } catch (ignore: any) {
-                }
+        // Remove the highlights we actually applied for the current issue.
+        for (const element of highlighted) {
+            try {
+                await element.evaluate((el) => {
+                    el.style.outline = "none";
+                    const marker = el.querySelector(`[id^="marker-"]`);
+                    if (marker) {
+                        marker.textContent = "";
+                        marker.remove();
+                    }
+                }, {timeout: 250});
+            } catch (ignore: any) {
             }
         }
     }
 }
 
+// The config is read from disk and the regexes recompiled on every decorated
+// method call; cache it since it never changes during a run.
+let cachedConfig: any = null;
+let cachedEnvPath: string | null = null;
+
 function loadEnvConfig(envPath: string = ".env.a11y") {
+    if (cachedConfig !== null && cachedEnvPath === envPath) return cachedConfig;
+
     const defaultConfig = {
         scan: true,
         outputDir: "axe-playwright-report/pages",
         screenshots: false,
+        includePasses: true,
         tags: [] as string[],
         withRules: [] as string[],
         excludeRules: [] as string[],
@@ -159,7 +176,11 @@ function loadEnvConfig(envPath: string = ".env.a11y") {
         customRegExp: [] as RegExp[],
     };
 
-    if (!fs.existsSync(envPath)) return defaultConfig;
+    if (!fs.existsSync(envPath)) {
+        cachedConfig = defaultConfig;
+        cachedEnvPath = envPath;
+        return defaultConfig;
+    }
 
     const content = fs.readFileSync(envPath, "utf-8");
     const env: Record<string, string> = {};
@@ -189,10 +210,13 @@ function loadEnvConfig(envPath: string = ".env.a11y") {
             });
     }
 
-    return {
+    const config = {
         scan: env["SCAN"] ? env["SCAN"].toUpperCase() === "ON" : (process.env.SCAN ? process.env.SCAN.toUpperCase() === "ON" : defaultConfig.scan),
         outputDir: env["OUTPUT_DIR"] ? env["OUTPUT_DIR"] + "/pages" : (process.env.OUTPUT_DIR ? process.env.OUTPUT_DIR + "/pages" : defaultConfig.outputDir),
         screenshots: env["SCREENSHOT"] ? env["SCREENSHOT"].toUpperCase() === "ON" : (process.env.SCREENSHOT ? process.env.SCREENSHOT.toUpperCase() === "ON" : defaultConfig.screenshots),
+        // Passes are stored by default; only the literal value "OFF" drops them
+        // (they are the largest, rarely-read slice of an axe result).
+        includePasses: env["INCLUDE_PASSES"] ? env["INCLUDE_PASSES"].toUpperCase() !== "OFF" : (process.env.INCLUDE_PASSES ? process.env.INCLUDE_PASSES.toUpperCase() !== "OFF" : defaultConfig.includePasses),
         tags: env["TAGS"] ? env["TAGS"].split(",").map(t => t.trim()).filter(Boolean) : (process.env.TAGS ? process.env.TAGS.split(",").map(t => t.trim()).filter(Boolean) : defaultConfig.tags),
         withRules: env["WITH_RULES"] ? env["WITH_RULES"].split(",").map(t => t.trim()).filter(Boolean) : (process.env.WITH_RULES ? process.env.WITH_RULES.split(",").map(t => t.trim()).filter(Boolean) : defaultConfig.withRules),
         excludeRules: env["EXCLUDE_RULES"] ? env["EXCLUDE_RULES"].split(",").map(t => t.trim()).filter(Boolean) : (process.env.EXCLUDE_RULES ? process.env.EXCLUDE_RULES.split(",").map(t => t.trim()).filter(Boolean) : defaultConfig.excludeRules),
@@ -200,6 +224,10 @@ function loadEnvConfig(envPath: string = ".env.a11y") {
         exclude: env["EXCLUDE"] ? env["EXCLUDE"].split(",").map(t => t.trim()).filter(Boolean) : (process.env.EXCLUDE ? process.env.EXCLUDE.split(",").map(t => t.trim()).filter(Boolean) : defaultConfig.exclude),
         customRegExp: regexPatterns
     };
+
+    cachedConfig = config;
+    cachedEnvPath = envPath;
+    return config;
 }
 
 async function highlightElement(element: Locator, index: number, color: string) {

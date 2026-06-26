@@ -14,10 +14,10 @@ class AxeReporter implements Reporter {
         cleanUp()
     }
 
-    onEnd() {
-        if (this.softAssert === undefined) main()
+    async onEnd() {
+        if (this.softAssert === undefined) await main()
         else {
-            main()
+            await main()
             const isFailed = test(this.softAssert, true)
             if (isFailed) process.exit(1)
         }

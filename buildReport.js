@@ -74,6 +74,19 @@ function readJSONFile(path) {
     return JSON.parse(fs.readFileSync(path, 'utf8'));
 }
 
+
+// Build a ruleId -> rule lookup once, so callers can avoid O(n) `affected.find()`
+// for every rule of every report.
+function buildAffectedIndex(affected) {
+    const index = new Map();
+    if (Array.isArray(affected)) {
+        for (const rule of affected) {
+            if (rule && rule.ruleId) index.set(rule.ruleId, rule);
+        }
+    }
+    return index;
+}
+
 function generateBaseDashboard(template) {
     return template.replace("{{CONTENT}}",
         `<body>
@@ -381,7 +394,7 @@ function generateBaseContent(template, report) {
     </script>`
 }
 
-function generateFilters(report, affected) {
+function generateFilters(report, affectedIndex) {
     // Extract unique impact values and tags (existing code)
     const impactValues = new Set();
     const tagValues = new Set();
@@ -399,8 +412,8 @@ function generateFilters(report, affected) {
         }
 
         // Collect all unique disability types
-        if (affected && Array.isArray(affected)) {
-            const rule = affected.find(item => item.ruleId === issue.id);
+        if (affectedIndex) {
+            const rule = affectedIndex.get(issue.id);
             if (rule && rule['disabilityTypesAffected']) {
                 rule['disabilityTypesAffected'].forEach(disability => {
                     if (disability.name) {
@@ -544,10 +557,10 @@ function generateTabContent(tabName, issueCards) {
     `;
 }
 
-function generateIssueCards(issues, affected, screenshot) {
+function generateIssueCards(issues, affectedIndex, screenshot) {
     function getDisabilityTypes(ruleId) {
-        if (!affected || !Array.isArray(affected)) return [];
-        const rule = affected.find(item => item.ruleId === ruleId);
+        if (!affectedIndex) return [];
+        const rule = affectedIndex.get(ruleId);
         return rule ? rule['disabilityTypesAffected'] || [] : [];
     }
 
@@ -792,37 +805,33 @@ function generateTableCards(reports) {
     // Prepare data for sorting
     let tableData = reports.map(report => {
         //const standard = report.standard || 'N/A';
-        const critical_elements = [...report.violations, ...report.incomplete]
-            .map(v => v.nodes.filter(node => node.impact === 'critical').length)
-            .reduce((sum, count) => sum + count, 0);
+        const violationsList = report.violations || [];
+        const incompleteList = report.incomplete || [];
 
-        const serious_elements = [...report.violations, ...report.incomplete]
-            .map(v => v.nodes.filter(node => node.impact === 'serious').length)
-            .reduce((sum, count) => sum + count, 0);
+        // Single pass over violations + incomplete tallies both element-level
+        // (per affected node) and rule-level impact counts, instead of spreading
+        // and re-scanning the arrays once per impact bucket.
+        let critical_elements = 0, serious_elements = 0, moderate_elements = 0, minor_elements = 0;
+        let critical = 0, serious = 0, moderate = 0, none = 0;
+        const tally = issue => {
+            if (issue.impact === 'critical') critical++;
+            else if (issue.impact === 'serious') serious++;
+            else if (issue.impact === 'moderate') moderate++;
+            else none++;
+            for (const node of (issue.nodes || [])) {
+                if (node.impact === 'critical') critical_elements++;
+                else if (node.impact === 'serious') serious_elements++;
+                else if (node.impact === 'moderate') moderate_elements++;
+                else if (node.impact === 'minor') minor_elements++;
+            }
+        };
+        violationsList.forEach(tally);
+        incompleteList.forEach(tally);
 
-        const moderate_elements = [...report.violations, ...report.incomplete]
-            .map(v => v.nodes.filter(node => node.impact === 'moderate').length)
-            .reduce((sum, count) => sum + count, 0);
-
-        const minor_elements = [...report.violations, ...report.incomplete]
-            .map(v => v.nodes.filter(node => node.impact === 'minor').length)
-            .reduce((sum, count) => sum + count, 0);
-
-        const violations = report.violations ? report.violations.length : 0;
-        const incomplete = report.incomplete ? report.incomplete.length : 0;
+        const violations = violationsList.length;
+        const incomplete = incompleteList.length;
         const passes = report.passes ? report.passes.length : 0;
         const inapplicable = report.inapplicable ? report.inapplicable.length : 0;
-        let critical = 0, serious = 0, moderate = 0, none = 0;
-        ['violations', 'incomplete'].forEach(section => {
-            if (report[section]) {
-                report[section].forEach(issue => {
-                    if (issue.impact === 'critical') critical++;
-                    else if (issue.impact === 'serious') serious++;
-                    else if (issue.impact === 'moderate') moderate++;
-                    else none++;
-                });
-            }
-        });
         return {
             id: report.id,
             pagePath: report.pagePath || report.id,
@@ -1071,11 +1080,11 @@ function generateImpactDistribution(reports) {
 </div>`;
 }
 
-function generateDisabilityAffected(reports, affected) {
+function generateDisabilityAffected(reports, affectedIndex) {
     const disabilitiesArray = [];
     reports.forEach(report => {
         report.violations.forEach(violation => {
-            const rule = affected.find(item => item.ruleId === violation.id);
+            const rule = affectedIndex.get(violation.id);
             if (rule && rule['disabilityTypesAffected']) {
                 rule['disabilityTypesAffected'].forEach(disability => {
                     disabilitiesArray.push(disability.name);
@@ -1084,7 +1093,7 @@ function generateDisabilityAffected(reports, affected) {
         });
 
         report.incomplete.forEach(incomplete => {
-            const rule = affected.find(item => item.ruleId === incomplete.id);
+            const rule = affectedIndex.get(incomplete.id);
             if (rule && rule['disabilityTypesAffected']) {
                 rule['disabilityTypesAffected'].forEach(disability => {
                     disabilitiesArray.push(disability.name);
@@ -1093,7 +1102,7 @@ function generateDisabilityAffected(reports, affected) {
         });
 
         report.passes.forEach(passes => {
-            const rule = affected.find(item => item.ruleId === passes.id);
+            const rule = affectedIndex.get(passes.id);
             if (rule && rule['disabilityTypesAffected']) {
                 rule['disabilityTypesAffected'].forEach(disability => {
                     disabilitiesArray.push(disability.name);
@@ -1123,7 +1132,7 @@ function generateDisabilityAffected(reports, affected) {
                         <span class="text-sm text-gray-500">${percentage}% (${count})</span>
                     </div>
                     <div class="w-full bg-gray-200 rounded h-4">
-                        <div class="h-4 rounded" style="width: ${percentage}%; background-color: var(--${disability.toLowerCase().replaceAll(" ", "-")}-color);"></div>
+                        <div class="h-4 rounded" style="width: ${percentage}%; background-color: var(--${disability.toLowerCase().replace(/ /g, "-")}-color);"></div>
                     </div>
                 </div>
             `;
@@ -1178,7 +1187,7 @@ function updateBugReportButtonBadge() {
     if (count > 0) {
         const badge = document.createElement('div');
         badge.className = 'badge-count absolute -top-2 -right-2 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center font-bold';
-        badge.textContent = count > 99 ? '99+' : count;
+        badge.textContent = count > 99 ? '99+' : String(count);
         badge.style.fontSize = '10px';
         badge.style.minWidth = '20px';
         badge.style.height = '20px';
@@ -1187,23 +1196,18 @@ function updateBugReportButtonBadge() {
 }
 
 // Main function to generate the report
-function generateReport() {
-    const dirname = __dirname.replace(/\/dist$/, '');
-    const template = fs.readFileSync(path.join(dirname, './index.template.html'), 'utf8');
-    const reports = readAllJsonAndPutIntoArray();
-    if (reports.length === 0) return;
-
-    const affected = readJSONFile(dirname + "/disabilityAffectedData/" + getAxeVersion(reports[0].testEngine.version) + ".json");
-
-    reports.forEach(report => {
+function generateReport(reports, template, affectedIndex) {
+    // Build each page's HTML synchronously, then write them all concurrently
+    // rather than blocking on one fs.writeFileSync at a time.
+    return Promise.all(reports.map(report => {
         let baseContent = generateBaseContent(template, report);
         //let searchBar = generateSearchBar();
         let tabs = generateTabs(report);
-        let violationsIssueCards = generateIssueCards(report.violations, affected, report.id + "_violations.png");
-        let incompleteIssueCards = generateIssueCards(report.incomplete, affected, report.id + "_incomplete.png");
-        let passedIssueCards = generateIssueCards(report.passes, affected);
+        let violationsIssueCards = generateIssueCards(report.violations, affectedIndex, report.id + "_violations.png");
+        let incompleteIssueCards = generateIssueCards(report.incomplete, affectedIndex, report.id + "_incomplete.png");
+        let passedIssueCards = generateIssueCards(report.passes, affectedIndex);
 
-        baseContent = baseContent.replace("{{FILTERS}}", generateFilters(report, affected));
+        baseContent = baseContent.replace("{{FILTERS}}", generateFilters(report, affectedIndex));
         //baseContent = baseContent.replace("{{SEARCH_BAR}}", searchBar);
         baseContent = baseContent.replace("{{TABS}}", tabs);
         baseContent = baseContent.replace("{{FILTERS}}", '');
@@ -1212,25 +1216,19 @@ function generateReport() {
         baseContent = baseContent.replace("./styles.css", "../styles.css");
 
         const id = report.id || normalizePath(report.url)
-        fs.writeFileSync(getOutputPath(PAGES_DIR, id + ".html"), baseContent, 'utf8');
-    });
+        return fs.promises.writeFile(getOutputPath(PAGES_DIR, id + ".html"), baseContent, 'utf8');
+    }));
 }
 
-function generateDashboard() {
-    const dirname = __dirname.replace(/\/dist$/, '');
-    const template = fs.readFileSync(path.join(dirname, './index.template.html'), 'utf8');
+function generateDashboard(reports, template, affectedIndex) {
     const outputPath = getOutputPath('index.html');
-    const reports = readAllJsonAndPutIntoArray();
-    if (reports.length === 0) return;
-
-    const affected = readJSONFile(dirname + "/disabilityAffectedData/" + getAxeVersion(reports[0].testEngine.version) + ".json");
 
     let dashboardBody = generateBaseDashboard(template);
     const summaryCards = generateSummaryCart(reports);
     const dashboardSearchBar = generateDashboardSearchBar();
     const tableCards = generateTableCards(reports);
     const impactDistributionChart = generateImpactDistribution(reports);
-    const disabilityAffected = generateDisabilityAffected(reports, affected);
+    const disabilityAffected = generateDisabilityAffected(reports, affectedIndex);
 
     dashboardBody = dashboardBody.replace('{{summary_cards}}', summaryCards);
     dashboardBody = dashboardBody.replace('{{impact_distribution_chart}}', impactDistributionChart);
@@ -1241,6 +1239,24 @@ function generateDashboard() {
     fs.writeFileSync(outputPath, dashboardBody, 'utf8');
 
     console.log(`Report successfully generated: file://${getOutputPath('index.html')}`);
+}
+
+// Delete every report JSON and its screenshots for the given uuids. Lists the
+// pages directory once (instead of once per uuid) and relies on unlinkSync being
+// synchronous — no post-delete polling needed.
+function deleteReportsByUuid(uuids) {
+    if (!uuids || uuids.length === 0) return;
+    const uuidSet = new Set(uuids);
+    const dir = getOutputPath(PAGES_DIR);
+    for (const file of fs.readdirSync(dir)) {
+        // File names are `${uuid}.json` or `${uuid}_violations_1.png`; the uuid
+        // contains no `.`/`_`, so the first such delimiter ends it.
+        const prefix = file.split(/[._]/)[0];
+        if (uuidSet.has(prefix)) {
+            const filePath = getOutputPath(PAGES_DIR, file);
+            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        }
+    }
 }
 
 function deduplicate(strategy) {
@@ -1283,22 +1299,7 @@ function deduplicate(strategy) {
                 seen.set(key, report);
             }
         }
-        for (const uuid of toDelete) {
-            const filesToDelete = fs.readdirSync(getOutputPath(PAGES_DIR)).filter(file =>
-                file.startsWith(uuid)
-            );
-            filesToDelete.forEach(file => {
-                const filePath = getOutputPath(PAGES_DIR, file);
-                if (fs.existsSync(filePath)) {
-                    fs.unlinkSync(filePath);
-                    // Wait up to 1 second for the file to be deleted
-                    const start = Date.now();
-                    while (fs.existsSync(filePath) && Date.now() - start < 1000) {
-                        // Busy-wait, but will break after 1 second
-                    }
-                }
-            });
-        }
+        deleteReportsByUuid(toDelete);
         return;
     }
 
@@ -1330,31 +1331,18 @@ function deduplicate(strategy) {
             }
         }
 
-        for (const uuid of toDelete) {
-            const filesToDelete = fs.readdirSync(getOutputPath(PAGES_DIR)).filter(file =>
-                file.startsWith(uuid)
-            );
-            filesToDelete.forEach(file => {
-                const filePath = getOutputPath(PAGES_DIR, file);
-                if (fs.existsSync(filePath)) {
-                    fs.unlinkSync(filePath);
-                    // Wait up to 1 second for the file to be deleted
-                    const start = Date.now();
-                    while (fs.existsSync(filePath) && Date.now() - start < 1000) {
-                        // Busy-wait, but will break after 1 second
-                    }
-                }
-            });
-        }
+        deleteReportsByUuid(toDelete);
     }
 }
 
-function generateCategoryImpactSummary(print = true) {
-    const reports = getReportFiles().map(file => {
-        const filePath = getOutputPath(PAGES_DIR, file);
-        const raw = fs.readFileSync(filePath, 'utf-8');
-        return JSON.parse(raw);
-    });
+function generateCategoryImpactSummary(print = true, reports = null) {
+    if (!reports) {
+        reports = getReportFiles().map(file => {
+            const filePath = getOutputPath(PAGES_DIR, file);
+            const raw = fs.readFileSync(filePath, 'utf-8');
+            return JSON.parse(raw);
+        });
+    }
 
     if (reports.length === 0) {
         const impactSummary = createEmptyImpactSummary();
@@ -1579,7 +1567,7 @@ function normalizePath(url) {
 }
 
 
-function main() {
+async function main() {
     console.log("Generating Accessibility Reports...");
     if (getReportFiles().length === 0) {
         console.log("No accessibility scan results found. Skipping report generation.");
@@ -1587,11 +1575,21 @@ function main() {
     }
 
     deduplicate(MERGE_STRATEGY);
-    generateCategoryImpactSummary()
-    generateReport();
-    generateDashboard();
+
+    // Read & parse the (deduplicated) scan results once, then share them with
+    // every consumer instead of re-reading the corpus from disk for each.
+    const reports = readAllJsonAndPutIntoArray();
+    if (reports.length === 0) return;
 
     const dirname = __dirname.replace(/\/dist$/, '');
+    const template = fs.readFileSync(path.join(dirname, './index.template.html'), 'utf8');
+    const affected = readJSONFile(dirname + "/disabilityAffectedData/" + getAxeVersion(reports[0].testEngine.version) + ".json");
+    const affectedIndex = buildAffectedIndex(affected);
+
+    generateCategoryImpactSummary(true, reports);
+    await generateReport(reports, template, affectedIndex);
+    generateDashboard(reports, template, affectedIndex);
+
     fs.copyFileSync(path.join(dirname, './styles.css'), getOutputPath('./styles.css'));
     fs.copyFileSync(path.join(dirname, './main.js'), getOutputPath('./main.js'));
 
@@ -1600,5 +1598,8 @@ function main() {
 module.exports = {main, deduplicate, cleanUp, test};
 
 if (require.main === module) {
-    main();
+    main().catch(err => {
+        console.error(err);
+        process.exit(1);
+    });
 }

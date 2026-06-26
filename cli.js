@@ -4,25 +4,30 @@ const command = args[0];
 const build = require('./buildReport.js');
 const path = require("path");
 
+function fail(err) {
+    console.error(err);
+    process.exit(1);
+}
+
 if (command === 'build-report') {
-    build.main()
+    build.main().catch(fail)
 } else if (command === 'merge-reports') {
-    const path = require("path");
     require('dotenv').config({ path: path.join(process.cwd(), '.env.a11y') });
     const MERGE_STRATEGY = process.env.MERGE_STRATEGY || 'best';
     console.log('Merging accessibility reports using strategy:', MERGE_STRATEGY);
     build.deduplicate(MERGE_STRATEGY);
     console.log('Done');
 } else if (command === 'test') {
-    build.main()
-    if (args.length > 1){
-        if (args[1].includes("--allow-failure")) {
-            build.test(true)
+    // main() runs deduplication; the baseline check must see the deduped set.
+    build.main().then(() => {
+        if (args.length > 1) {
+            if (args[1].includes("--allow-failure")) {
+                build.test(true)
+            }
+        } else {
+            build.test()
         }
-    }
-    else {
-        build.test()
-    }
+    }).catch(fail)
 } else {
     if (args.length > 0) console.log(`Unknown command: ${command}\n`);
     console.log('Available commands:');

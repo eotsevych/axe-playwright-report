@@ -15,7 +15,8 @@
     "build": "tsc && cp buildReport.js dist/",
     "prepublishOnly": "npm run build",
     "build-report": "build-report",
-    "test": "echo \"No tests yet\" && exit 0"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.typecheck.json",
+    "test": "node --test test/*.test.js"
   },
   "files": [
     "dist",
