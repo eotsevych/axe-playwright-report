@@ -36,7 +36,7 @@ export function axeScan<This, Args extends any[], Return>() {
             const accessibilityConfig = loadEnvConfig()
 
             if (accessibilityConfig.scan) {
-                const page: Page | undefined = Object.values(this).find((prop): prop is Page => prop?.constructor?.name === 'Page');
+                const page: Page | undefined = Object.values(this).find(isPlaywrightPage);
 
                 if (!page) {
                     console.warn(`Page not found in context in args [${Object.values(this)}].\n(Make sure you are using the decorator on a method that has access to the Playwright Page);\nSkipping axe scan.\n`);
@@ -44,7 +44,6 @@ export function axeScan<This, Args extends any[], Return>() {
                 }
 
                 let axeBuilder = new AxeBuilder({page});
-                console.log(accessibilityConfig.withRules)
                 if (accessibilityConfig.tags.length > 0) axeBuilder.withTags(accessibilityConfig.tags);
                 if (accessibilityConfig.withRules.length > 0) axeBuilder.withRules(accessibilityConfig.withRules);
                 if (accessibilityConfig.excludeRules.length > 0) axeBuilder.disableRules(accessibilityConfig.excludeRules);
@@ -89,6 +88,22 @@ export function axeScan<This, Args extends any[], Return>() {
 
         return scan as (this: This, ...args: Args) => Promise<Return>;
     }
+}
+
+/**
+ * Detects a Playwright `Page` by duck-typing rather than by `constructor.name`.
+ *
+ * Playwright renamed the internal class from `Page` to `_Page` in v1.60, which
+ * broke a `constructor?.name === 'Page'` check. Checking for the methods every
+ * `Page` exposes is version-agnostic and survives such internal renames.
+ */
+function isPlaywrightPage(prop: any): prop is Page {
+    return (
+        typeof prop?.goto === 'function' &&
+        typeof prop?.screenshot === 'function' &&
+        typeof prop?.locator === 'function' &&
+        typeof prop?.context === 'function'
+    );
 }
 
 function formatUrl(inputUrl: string): string {

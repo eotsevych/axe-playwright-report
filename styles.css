@@ -711,6 +711,15 @@ tr {
     border-bottom: 1px solid var(--color-border);
 }
 
+tr.clickable-report-row {
+    cursor: pointer;
+}
+
+tr.clickable-report-row:focus {
+    outline: 2px solid var(--primary);
+    outline-offset: -2px;
+}
+
 .url-cell {
     font-weight: 500;
 }

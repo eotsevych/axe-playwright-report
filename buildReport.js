@@ -9,22 +9,46 @@ const BASE_DIR = process.env.OUTPUT_DIR || './axe-playwright-report'
 const PAGES_DIR = '/pages';
 const MERGE_STRATEGY = process.env.MERGE_STRATEGY || 'best';
 
+function getOutputPath(...segments) {
+    const outputDir = path.isAbsolute(BASE_DIR) ? BASE_DIR : path.join(process.cwd(), BASE_DIR);
+    return path.join(outputDir, ...segments);
+}
+
+function createEmptyImpactSummary() {
+    return {
+        "Violations": {
+            "Critical": 0,
+            "Serious": 0,
+            "Moderate": 0,
+            "Minor": 0
+        },
+        "Incomplete": {
+            "Critical": 0,
+            "Serious": 0,
+            "Moderate": 0,
+            "Minor": 0
+        },
+        "Passed": 0,
+        "Inapplicable": 0
+    };
+}
 
 function cleanUp() {
-    if (fs.existsSync(BASE_DIR)) {
-        fs.rmSync(BASE_DIR, {recursive: true, force: true});
+    const outputDir = getOutputPath();
+    if (fs.existsSync(outputDir)) {
+        fs.rmSync(outputDir, {recursive: true, force: true});
     }
 }
 
 function getReportFiles() {
     let allFiles = [];
+    const reportDir = getOutputPath(PAGES_DIR);
 
     try {
-        allFiles = fs.readdirSync(BASE_DIR + PAGES_DIR);
+        allFiles = fs.readdirSync(reportDir);
     } catch (err) {
         if (err.code === 'ENOENT') {
-            console.log(`Directory ${path.join(process.cwd(), BASE_DIR, PAGES_DIR)} not found`);
-            return
+            return [];
         } else {
             throw err
         }
@@ -669,13 +693,11 @@ function combineIssueCards(issues) {
 
 function readAllJsonAndPutIntoArray() {
     const reports = [];
-    const filePath = path.join(process.cwd(), BASE_DIR, PAGES_DIR);
-    const files = fs.readdirSync(filePath);
+    const filePath = getOutputPath(PAGES_DIR);
+    const files = getReportFiles();
     files.forEach(file => {
-        if (file.endsWith('.json')) {
-            const report = JSON.parse(fs.readFileSync(path.join(filePath, file), 'utf8'));
-            reports.push(report);
-        }
+        const report = JSON.parse(fs.readFileSync(path.join(filePath, file), 'utf8'));
+        reports.push(report);
     });
     return reports;
 }
@@ -872,7 +894,7 @@ function generateTableCards(reports) {
 
     function renderTableRows() {
         return tableData.map(row => `
-            <tr>
+            <tr class="clickable-report-row" data-href="./pages/${row.id}.html" tabindex="0" role="link" aria-label="Open report for ${escapeHTML(row.pagePath)}">
                 <td class="url-cell border-col"><a href="./pages/${row.id}.html">${row.pagePath}</a></td>
                 <td class="status-cell critical_elements center-cell">${row.critical_elements}</td>
                 <td class="status-cell serious_elements center-cell">${row.serious_elements}</td>
@@ -908,6 +930,13 @@ function generateTableCards(reports) {
                 if (sortKey !== col) return '<span class="sort-icon" style="display:inline-block;width:1em;">&nbsp;</span>';
                 return sortDir === 'asc' ? '<span class="sort-icon" style="display:inline-block;width:1em;">↑</span>' : '<span class="sort-icon" style="display:inline-block;width:1em;">↓</span>';
             }
+            function escapeAttribute(value) {
+                return String(value ?? '')
+                    .replace(/&/g, '&amp;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;');
+            }
             function sortTableData() {
                 tableData.sort(function(a, b) {
                     if (sortKey === 'pagePath') {
@@ -921,7 +950,7 @@ function generateTableCards(reports) {
             }
             function renderTableRows() {
                 return tableData.map(function(row) {
-                    return '<tr>' +
+                    return '<tr class="clickable-report-row" data-href="./pages/' + row.id + '.html" tabindex="0" role="link" aria-label="Open report for ' + escapeAttribute(row.pagePath) + '">' +
                         '<td class="url-cell border-col"><a href="./pages/' + row.id + '.html">' + row.pagePath + '</a></td>' +
                         '<td class="status-cell critical_elements center-cell">' + row.critical_elements + '</td>' +
                         '<td class="status-cell serious_elements center-cell">' + row.serious_elements + '</td>' +
@@ -957,6 +986,23 @@ function generateTableCards(reports) {
                     }
                     updateTable();
                 });
+            });
+            const sortableTable = document.getElementById('sortable-table');
+            function openReportRow(row) {
+                const href = row.getAttribute('data-href');
+                if (href) window.location.href = href;
+            }
+            sortableTable.addEventListener('click', function(event) {
+                if (event.target.closest('a')) return;
+                const row = event.target.closest('tr.clickable-report-row');
+                if (row) openReportRow(row);
+            });
+            sortableTable.addEventListener('keydown', function(event) {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                const row = event.target.closest('tr.clickable-report-row');
+                if (!row) return;
+                event.preventDefault();
+                openReportRow(row);
             });
         })();
         </script>
@@ -1145,6 +1191,8 @@ function generateReport() {
     const dirname = __dirname.replace(/\/dist$/, '');
     const template = fs.readFileSync(path.join(dirname, './index.template.html'), 'utf8');
     const reports = readAllJsonAndPutIntoArray();
+    if (reports.length === 0) return;
+
     const affected = readJSONFile(dirname + "/disabilityAffectedData/" + getAxeVersion(reports[0].testEngine.version) + ".json");
 
     reports.forEach(report => {
@@ -1164,15 +1212,17 @@ function generateReport() {
         baseContent = baseContent.replace("./styles.css", "../styles.css");
 
         const id = report.id || normalizePath(report.url)
-        fs.writeFileSync(path.join(BASE_DIR, PAGES_DIR, id + ".html"), baseContent, 'utf8');
+        fs.writeFileSync(getOutputPath(PAGES_DIR, id + ".html"), baseContent, 'utf8');
     });
 }
 
 function generateDashboard() {
     const dirname = __dirname.replace(/\/dist$/, '');
     const template = fs.readFileSync(path.join(dirname, './index.template.html'), 'utf8');
-    const outputPath = path.join(process.cwd(), BASE_DIR, 'index.html');
+    const outputPath = getOutputPath('index.html');
     const reports = readAllJsonAndPutIntoArray();
+    if (reports.length === 0) return;
+
     const affected = readJSONFile(dirname + "/disabilityAffectedData/" + getAxeVersion(reports[0].testEngine.version) + ".json");
 
     let dashboardBody = generateBaseDashboard(template);
@@ -1190,12 +1240,12 @@ function generateDashboard() {
 
     fs.writeFileSync(outputPath, dashboardBody, 'utf8');
 
-    console.log(`Report successfully generated: file://${path.join(process.cwd(), BASE_DIR, 'index.html')}`);
+    console.log(`Report successfully generated: file://${getOutputPath('index.html')}`);
 }
 
 function deduplicate(strategy) {
     const reports = getReportFiles().map(file => {
-        const filePath = path.join(BASE_DIR + PAGES_DIR, file);
+        const filePath = getOutputPath(PAGES_DIR, file);
         const raw = fs.readFileSync(filePath, 'utf-8');
         const data = JSON.parse(raw);
         const fileId = path.basename(file, '.json');
@@ -1234,11 +1284,11 @@ function deduplicate(strategy) {
             }
         }
         for (const uuid of toDelete) {
-            const filesToDelete = fs.readdirSync(BASE_DIR + PAGES_DIR).filter(file =>
+            const filesToDelete = fs.readdirSync(getOutputPath(PAGES_DIR)).filter(file =>
                 file.startsWith(uuid)
             );
             filesToDelete.forEach(file => {
-                const filePath = path.join(BASE_DIR + PAGES_DIR, file);
+                const filePath = getOutputPath(PAGES_DIR, file);
                 if (fs.existsSync(filePath)) {
                     fs.unlinkSync(filePath);
                     // Wait up to 1 second for the file to be deleted
@@ -1281,11 +1331,11 @@ function deduplicate(strategy) {
         }
 
         for (const uuid of toDelete) {
-            const filesToDelete = fs.readdirSync(BASE_DIR + PAGES_DIR).filter(file =>
+            const filesToDelete = fs.readdirSync(getOutputPath(PAGES_DIR)).filter(file =>
                 file.startsWith(uuid)
             );
             filesToDelete.forEach(file => {
-                const filePath = path.join(BASE_DIR + PAGES_DIR, file);
+                const filePath = getOutputPath(PAGES_DIR, file);
                 if (fs.existsSync(filePath)) {
                     fs.unlinkSync(filePath);
                     // Wait up to 1 second for the file to be deleted
@@ -1301,10 +1351,18 @@ function deduplicate(strategy) {
 
 function generateCategoryImpactSummary(print = true) {
     const reports = getReportFiles().map(file => {
-        const filePath = path.join(BASE_DIR + PAGES_DIR, file);
+        const filePath = getOutputPath(PAGES_DIR, file);
         const raw = fs.readFileSync(filePath, 'utf-8');
         return JSON.parse(raw);
     });
+
+    if (reports.length === 0) {
+        const impactSummary = createEmptyImpactSummary();
+        if (print) {
+            console.log("\nNo accessibility scan results found. Skipping accessibility summary.\n");
+        }
+        return impactSummary;
+    }
 
     // Violations
 
@@ -1374,7 +1432,7 @@ function generateCategoryImpactSummary(print = true) {
         "Inapplicable": inapplicable
     }
 
-    fs.writeFileSync(path.join(BASE_DIR, 'impactSummary.json'), JSON.stringify(impactSummary, null, 2), 'utf-8');
+    fs.writeFileSync(getOutputPath('impactSummary.json'), JSON.stringify(impactSummary, null, 2), 'utf-8');
     if (print) {
         const colors = {
             reset: "\x1b[0m",
@@ -1412,6 +1470,7 @@ function generateCategoryImpactSummary(print = true) {
 function test(allowFailure = false, delayTermination = false) {
     const violationThreshold = process.env.VIOLATION_THRESHOLD
     const incompleteThreshold = process.env.INCOMPLETE_THRESHOLD
+    const hasReports = getReportFiles().length > 0;
     const res = generateCategoryImpactSummary(false);
     let fail = false;
     const colors = {
@@ -1429,6 +1488,11 @@ function test(allowFailure = false, delayTermination = false) {
     const incompleteThresholds = []
 
     console.log(`\n${colors.bold}Accessibility Quality Gate Evaluation${colors.reset}\n${colors.gray}────────────────────────────────────────────────────────────────────────────── ${colors.reset}`)
+
+    if (!hasReports) {
+        console.log(`${colors.bold}No accessibility scan results found, skipping pass/fail check.${colors.reset}\n`);
+        return false;
+    }
 
     const logs = []
 
@@ -1517,14 +1581,19 @@ function normalizePath(url) {
 
 function main() {
     console.log("Generating Accessibility Reports...");
+    if (getReportFiles().length === 0) {
+        console.log("No accessibility scan results found. Skipping report generation.");
+        return;
+    }
+
     deduplicate(MERGE_STRATEGY);
     generateCategoryImpactSummary()
     generateReport();
     generateDashboard();
 
     const dirname = __dirname.replace(/\/dist$/, '');
-    fs.copyFileSync(path.join(dirname, './styles.css'), path.join(process.cwd(), BASE_DIR, './styles.css'));
-    fs.copyFileSync(path.join(dirname, './main.js'), path.join(process.cwd(), BASE_DIR, './main.js'));
+    fs.copyFileSync(path.join(dirname, './styles.css'), getOutputPath('./styles.css'));
+    fs.copyFileSync(path.join(dirname, './main.js'), getOutputPath('./main.js'));
 
 }
 
