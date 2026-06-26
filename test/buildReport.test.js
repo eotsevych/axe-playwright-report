@@ -12,6 +12,9 @@ const path = require('path');
 function freshModule(env) {
     delete process.env.OUTPUT_DIR;
     delete process.env.MERGE_STRATEGY;
+    delete process.env.VIOLATION_THRESHOLD;
+    delete process.env.INCOMPLETE_THRESHOLD;
+    delete process.env.REPORT_CONCURRENCY;
     Object.assign(process.env, env);
     const modPath = require.resolve('../buildReport.js');
     delete require.cache[modPath];
@@ -140,11 +143,12 @@ test("deduplicate('best') keeps the richer report and deletes the duplicate + it
         fs.writeFileSync(path.join(pagesDir(dir), 'poor_violations_1.png'), 'png');
 
         const mod = freshModule({ OUTPUT_DIR: dir });
-        mod.deduplicate('best');
+        const kept = mod.deduplicate('best');
 
         assert.ok(fs.existsSync(path.join(pagesDir(dir), 'rich.json')), 'richer report kept');
         assert.ok(!fs.existsSync(path.join(pagesDir(dir), 'poor.json')), 'duplicate json deleted');
         assert.ok(!fs.existsSync(path.join(pagesDir(dir), 'poor_violations_1.png')), 'duplicate screenshot deleted');
+        assert.deepStrictEqual(kept.map(report => report.id), ['rich'], 'deduplicate returns kept report data');
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -176,6 +180,30 @@ test("deduplicate('none') keeps every report", async () => {
         mod.deduplicate('none');
 
         assert.strictEqual(jsonFiles(dir).length, 2);
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+test('test() checks thresholds without generating dashboard html', async () => {
+    const dir = tmpOut();
+    try {
+        writeReport(dir, makeReport({
+            id: 'gate',
+            violations: [rule('image-alt', 'critical', [node('critical')])]
+        }));
+        const mod = freshModule({
+            OUTPUT_DIR: dir,
+            MERGE_STRATEGY: 'none',
+            VIOLATION_THRESHOLD: '10'
+        });
+
+        const failed = mod.test(false, true);
+
+        assert.strictEqual(failed, false);
+        assert.ok(fs.existsSync(path.join(dir, 'impactSummary.json')), 'impact summary written');
+        assert.ok(!fs.existsSync(path.join(dir, 'index.html')), 'dashboard index.html was not generated');
+        assert.ok(!fs.existsSync(path.join(pagesDir(dir), 'gate.html')), 'per-page report html was not generated');
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
     }

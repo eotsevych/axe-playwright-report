@@ -17,8 +17,8 @@ class AxeReporter implements Reporter {
     async onEnd() {
         if (this.softAssert === undefined) await main()
         else {
-            await main()
-            const isFailed = test(this.softAssert, true)
+            const reportResult = await main()
+            const isFailed = test(this.softAssert, true, reportResult.reports, reportResult.stats)
             if (isFailed) process.exit(1)
         }
     }

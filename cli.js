@@ -18,16 +18,15 @@ if (command === 'build-report') {
     build.deduplicate(MERGE_STRATEGY);
     console.log('Done');
 } else if (command === 'test') {
-    // main() runs deduplication; the baseline check must see the deduped set.
-    build.main().then(() => {
-        if (args.length > 1) {
-            if (args[1].includes("--allow-failure")) {
-                build.test(true)
-            }
-        } else {
-            build.test()
-        }
-    }).catch(fail)
+    const allowFailure = args.includes('--allow-failure');
+    const buildReport = args.includes('--build-report');
+    if (buildReport) {
+        build.main()
+            .then(({reports, stats}) => build.test(allowFailure, false, reports, stats))
+            .catch(fail)
+    } else {
+        build.test(allowFailure)
+    }
 } else {
     if (args.length > 0) console.log(`Unknown command: ${command}\n`);
     console.log('Available commands:');
@@ -36,5 +35,6 @@ if (command === 'build-report') {
     console.log('  test           - Check accessibility baselines');
     console.log('');
     console.log('Usage: npx axe-playwright-report <command>');
+    console.log('       npx axe-playwright-report test [--allow-failure] [--build-report]');
     process.exit(1);
 }

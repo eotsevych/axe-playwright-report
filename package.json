@@ -16,6 +16,7 @@
     "prepublishOnly": "npm run build",
     "build-report": "build-report",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.typecheck.json",
+    "benchmark:report": "node scripts/benchmark-report.js",
     "test": "node --test test/*.test.js"
   },
   "files": [

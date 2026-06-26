@@ -81,11 +81,23 @@ export function axeScan<This, Args extends any[], Return>() {
                         accessibilityScanResults.passes = [];
                     }
 
-                    fs.writeFileSync(`${accessibilityConfig.outputDir}/${accessibilityScanResults['id']}.json`, JSON.stringify(accessibilityScanResults, null, 2));
+                    const persistedResults = accessibilityConfig.resultMode === "compact"
+                        ? compactAxeResult(accessibilityScanResults)
+                        : accessibilityScanResults;
 
-                    if (accessibilityConfig.screenshots) {
-                        await highlightEachIssuesAndSaveScreenshot(violations, page, "red", id + "_violations", accessibilityConfig.outputDir);
-                        await highlightEachIssuesAndSaveScreenshot(incomplete, page, "red", id + "_incomplete", accessibilityConfig.outputDir);
+                    fs.writeFileSync(`${accessibilityConfig.outputDir}/${accessibilityScanResults['id']}.json`, JSON.stringify(persistedResults, null, 2));
+
+                    if (accessibilityConfig.screenshots && accessibilityConfig.maxScreenshotsPerPage > 0) {
+                        let remainingScreenshots = accessibilityConfig.maxScreenshotsPerPage;
+                        const shouldCaptureViolations = accessibilityConfig.screenshotMode === "all" || accessibilityConfig.screenshotMode === "violations";
+                        if (shouldCaptureViolations) {
+                            const saved = await highlightEachIssuesAndSaveScreenshot(violations, page, "red", id + "_violations", accessibilityConfig.outputDir, remainingScreenshots);
+                            remainingScreenshots -= saved;
+                        }
+
+                        if (accessibilityConfig.screenshotMode === "all" && remainingScreenshots > 0) {
+                            await highlightEachIssuesAndSaveScreenshot(incomplete, page, "red", id + "_incomplete", accessibilityConfig.outputDir, remainingScreenshots);
+                        }
                     }
                 }
             }
@@ -118,8 +130,60 @@ function formatUrl(inputUrl: string): string {
     return path.startsWith("/") ? path : `/${path}`;
 }
 
-async function highlightEachIssuesAndSaveScreenshot(issues: any[], page: Page, color: string, fileName: string, outputDir: string) {
-    for (let i = 0; i < issues.length; i++) {
+function compactAxeResult(result: any) {
+    return {
+        id: result.id,
+        url: result.url,
+        newUrl: result.newUrl,
+        pagePath: result.pagePath,
+        path: result.path,
+        timestamp: result.timestamp,
+        testEngine: result.testEngine,
+        testRunner: result.testRunner,
+        testEnvironment: result.testEnvironment,
+        violationsScreenShot: result.violationsScreenShot,
+        incompleteScreenShot: result.incompleteScreenShot,
+        inapplicableScreenShot: result.inapplicableScreenShot,
+        violations: compactRules(result.violations),
+        incomplete: compactRules(result.incomplete),
+        passes: compactRules(result.passes),
+        inapplicable: compactRules(result.inapplicable),
+    };
+}
+
+function compactRules(rules: any[] = []) {
+    return (rules || []).map(rule => ({
+        id: rule.id,
+        impact: rule.impact,
+        tags: rule.tags || [],
+        description: rule.description,
+        help: rule.help,
+        helpUrl: rule.helpUrl,
+        nodes: (rule.nodes || []).map(compactNode),
+    }));
+}
+
+function compactNode(node: any) {
+    return {
+        impact: node.impact,
+        html: node.html,
+        target: node.target || [],
+        any: compactChecks(node.any),
+        all: compactChecks(node.all),
+    };
+}
+
+function compactChecks(checks: any[] = []) {
+    return (checks || []).map(check => ({
+        id: check.id,
+        impact: check.impact,
+        message: check.message,
+    }));
+}
+
+async function highlightEachIssuesAndSaveScreenshot(issues: any[], page: Page, color: string, fileName: string, outputDir: string, maxScreenshots: number = Number.POSITIVE_INFINITY) {
+    let savedScreenshots = 0;
+    for (let i = 0; i < issues.length && savedScreenshots < maxScreenshots; i++) {
         // Resolve each target locator once and remember the handles we highlighted,
         // so cleanup reuses them instead of re-querying every target a second time.
         const highlighted: Locator[] = [];
@@ -137,6 +201,7 @@ async function highlightEachIssuesAndSaveScreenshot(issues: any[], page: Page, c
         }
 
         await page.screenshot({path: `${outputDir}/${fileName}_${i + 1}.png`});
+        savedScreenshots++;
 
         // Remove the highlights we actually applied for the current issue.
         for (const element of highlighted) {
@@ -153,6 +218,7 @@ async function highlightEachIssuesAndSaveScreenshot(issues: any[], page: Page, c
             }
         }
     }
+    return savedScreenshots;
 }
 
 // The config is read from disk and the regexes recompiled on every decorated
@@ -167,6 +233,9 @@ function loadEnvConfig(envPath: string = ".env.a11y") {
         scan: true,
         outputDir: "axe-playwright-report/pages",
         screenshots: false,
+        screenshotMode: "all",
+        maxScreenshotsPerPage: Number.POSITIVE_INFINITY,
+        resultMode: "full",
         includePasses: true,
         tags: [] as string[],
         withRules: [] as string[],
@@ -210,10 +279,16 @@ function loadEnvConfig(envPath: string = ".env.a11y") {
             });
     }
 
+    const screenshotMode = normalizeScreenshotMode(env["SCREENSHOT_MODE"] || process.env.SCREENSHOT_MODE || defaultConfig.screenshotMode);
+    const screenshots = env["SCREENSHOT"] ? env["SCREENSHOT"].toUpperCase() === "ON" : (process.env.SCREENSHOT ? process.env.SCREENSHOT.toUpperCase() === "ON" : defaultConfig.screenshots);
+
     const config = {
         scan: env["SCAN"] ? env["SCAN"].toUpperCase() === "ON" : (process.env.SCAN ? process.env.SCAN.toUpperCase() === "ON" : defaultConfig.scan),
         outputDir: env["OUTPUT_DIR"] ? env["OUTPUT_DIR"] + "/pages" : (process.env.OUTPUT_DIR ? process.env.OUTPUT_DIR + "/pages" : defaultConfig.outputDir),
-        screenshots: env["SCREENSHOT"] ? env["SCREENSHOT"].toUpperCase() === "ON" : (process.env.SCREENSHOT ? process.env.SCREENSHOT.toUpperCase() === "ON" : defaultConfig.screenshots),
+        screenshots: screenshots && screenshotMode !== "off",
+        screenshotMode,
+        maxScreenshotsPerPage: parseScreenshotLimit(env["MAX_SCREENSHOTS_PER_PAGE"] || process.env.MAX_SCREENSHOTS_PER_PAGE, defaultConfig.maxScreenshotsPerPage),
+        resultMode: normalizeResultMode(env["RESULT_MODE"] || process.env.RESULT_MODE || defaultConfig.resultMode),
         // Passes are stored by default; only the literal value "OFF" drops them
         // (they are the largest, rarely-read slice of an axe result).
         includePasses: env["INCLUDE_PASSES"] ? env["INCLUDE_PASSES"].toUpperCase() !== "OFF" : (process.env.INCLUDE_PASSES ? process.env.INCLUDE_PASSES.toUpperCase() !== "OFF" : defaultConfig.includePasses),
@@ -228,6 +303,22 @@ function loadEnvConfig(envPath: string = ".env.a11y") {
     cachedConfig = config;
     cachedEnvPath = envPath;
     return config;
+}
+
+function normalizeScreenshotMode(value: string): "off" | "violations" | "all" {
+    const normalized = value.toLowerCase();
+    if (normalized === "off" || normalized === "violations" || normalized === "all") return normalized;
+    return "all";
+}
+
+function normalizeResultMode(value: string): "full" | "compact" {
+    return value.toLowerCase() === "compact" ? "compact" : "full";
+}
+
+function parseScreenshotLimit(value: string | undefined, fallback: number) {
+    if (value === undefined || value === "") return fallback;
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 async function highlightElement(element: Locator, index: number, color: string) {

@@ -2,12 +2,14 @@
 
 const fs = require('fs');
 const path = require("path");
+const os = require("os");
 const URL = require('url').URL;
 require('dotenv').config({path: path.join(process.cwd(), '.env.a11y')});
 
 const BASE_DIR = process.env.OUTPUT_DIR || './axe-playwright-report'
 const PAGES_DIR = '/pages';
 const MERGE_STRATEGY = process.env.MERGE_STRATEGY || 'best';
+const DEFAULT_REPORT_CONCURRENCY = Math.max(1, Math.min(4, os.cpus().length || 1));
 
 function getOutputPath(...segments) {
     const outputDir = path.isAbsolute(BASE_DIR) ? BASE_DIR : path.join(process.cwd(), BASE_DIR);
@@ -74,6 +76,30 @@ function readJSONFile(path) {
     return JSON.parse(fs.readFileSync(path, 'utf8'));
 }
 
+function parsePositiveInteger(value, fallback) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function getReportConcurrency() {
+    return parsePositiveInteger(process.env.REPORT_CONCURRENCY, DEFAULT_REPORT_CONCURRENCY);
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+    if (items.length === 0) return [];
+    const limit = Math.max(1, Math.min(concurrency, items.length));
+    const results = new Array(items.length);
+    let nextIndex = 0;
+
+    await Promise.all(Array.from({length: limit}, async () => {
+        while (nextIndex < items.length) {
+            const currentIndex = nextIndex++;
+            results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+        }
+    }));
+
+    return results;
+}
 
 // Build a ruleId -> rule lookup once, so callers can avoid O(n) `affected.find()`
 // for every rule of every report.
@@ -85,6 +111,142 @@ function buildAffectedIndex(affected) {
         }
     }
     return index;
+}
+
+function addImpactCount(bucket, impact, amount = 1) {
+    if (impact === 'critical') bucket.Critical += amount;
+    else if (impact === 'serious') bucket.Serious += amount;
+    else if (impact === 'moderate') bucket.Moderate += amount;
+    else if (impact === 'minor') bucket.Minor += amount;
+}
+
+function nodeCount(rule) {
+    return Array.isArray(rule?.nodes) ? rule.nodes.length : 0;
+}
+
+function getIssues(report, section) {
+    return Array.isArray(report?.[section]) ? report[section] : [];
+}
+
+function buildReportStats(reports, affectedIndex = null) {
+    const impactSummary = createEmptyImpactSummary();
+    const summary = {
+        violationsRulesTotalCount: 0,
+        violationElementsTotalCount: 0,
+        incompleteRulesTotalCount: 0,
+        incompleteElementsTotalCount: 0,
+        passesRulesTotalCount: 0,
+        passesElementsTotalCount: 0,
+        totalRulesReports: 0,
+        totalElementsReports: 0
+    };
+    const tableRows = [];
+    const disabilityCounts = {};
+    let disabilityIssueTotal = 0;
+
+    for (const report of reports || []) {
+        const violationsList = getIssues(report, 'violations');
+        const incompleteList = getIssues(report, 'incomplete');
+        const passesList = getIssues(report, 'passes');
+        const inapplicableList = getIssues(report, 'inapplicable');
+
+        summary.violationsRulesTotalCount += violationsList.length;
+        summary.incompleteRulesTotalCount += incompleteList.length;
+        summary.passesRulesTotalCount += passesList.length;
+
+        let critical_elements = 0, serious_elements = 0, moderate_elements = 0, minor_elements = 0;
+        let critical = 0, serious = 0, moderate = 0, none = 0;
+
+        const tallyDashboardIssue = issue => {
+            if (issue.impact === 'critical') critical++;
+            else if (issue.impact === 'serious') serious++;
+            else if (issue.impact === 'moderate') moderate++;
+            else none++;
+
+            for (const node of (issue.nodes || [])) {
+                if (node.impact === 'critical') critical_elements++;
+                else if (node.impact === 'serious') serious_elements++;
+                else if (node.impact === 'moderate') moderate_elements++;
+                else if (node.impact === 'minor') minor_elements++;
+            }
+        };
+
+        for (const violation of violationsList) {
+            summary.violationElementsTotalCount += nodeCount(violation);
+            tallyDashboardIssue(violation);
+            for (const node of (violation.nodes || [])) addImpactCount(impactSummary.Violations, node.impact);
+        }
+
+        for (const incomplete of incompleteList) {
+            summary.incompleteElementsTotalCount += nodeCount(incomplete);
+            tallyDashboardIssue(incomplete);
+            for (const node of (incomplete.nodes || [])) addImpactCount(impactSummary.Incomplete, node.impact);
+        }
+
+        for (const pass of passesList) {
+            const count = nodeCount(pass);
+            summary.passesElementsTotalCount += count;
+            impactSummary.Passed += count;
+        }
+
+        for (const item of inapplicableList) {
+            impactSummary.Inapplicable += nodeCount(item);
+        }
+
+        if (affectedIndex) {
+            for (const issue of [...violationsList, ...incompleteList, ...passesList]) {
+                disabilityIssueTotal++;
+                const rule = affectedIndex.get(issue.id);
+                for (const disability of (rule?.disabilityTypesAffected || [])) {
+                    if (!disability.name) continue;
+                    disabilityCounts[disability.name] = (disabilityCounts[disability.name] || 0) + 1;
+                }
+            }
+        } else {
+            disabilityIssueTotal += violationsList.length + incompleteList.length + passesList.length;
+        }
+
+        tableRows.push({
+            id: report.id,
+            pagePath: report.pagePath || report.id,
+            critical_elements,
+            serious_elements,
+            moderate_elements,
+            minor_elements,
+            violations: violationsList.length,
+            incomplete: incompleteList.length,
+            passes: passesList.length,
+            inapplicable: inapplicableList.length,
+            critical,
+            serious,
+            moderate,
+            none,
+            impactsSortKey: [critical_elements, serious_elements, moderate_elements, minor_elements, critical, serious, moderate, none],
+        });
+    }
+
+    summary.totalRulesReports =
+        summary.violationsRulesTotalCount +
+        summary.incompleteRulesTotalCount +
+        summary.passesRulesTotalCount;
+    summary.totalElementsReports =
+        summary.violationElementsTotalCount +
+        summary.incompleteElementsTotalCount +
+        summary.passesElementsTotalCount;
+
+    return {
+        summary,
+        tableRows,
+        impactSummary,
+        impactDistribution: {
+            Critical: impactSummary.Violations.Critical + impactSummary.Incomplete.Critical,
+            Serious: impactSummary.Violations.Serious + impactSummary.Incomplete.Serious,
+            Moderate: impactSummary.Violations.Moderate + impactSummary.Incomplete.Moderate,
+            Minor: impactSummary.Violations.Minor + impactSummary.Incomplete.Minor
+        },
+        disabilityCounts,
+        disabilityIssueTotal
+    };
 }
 
 function generateBaseDashboard(template) {
@@ -630,7 +792,7 @@ function generateIssueCards(issues, affectedIndex, screenshot) {
 <div class="border-t pt-3">
     <h2 class="font-medium mb-2">Page Screenshot:</h2>
     <div class="node-item">
-        ${fs.existsSync(`${BASE_DIR}${PAGES_DIR}/${screenshot?.replace(".png", `_${i + 1}.png`)}`) ?
+        ${fs.existsSync(getOutputPath(PAGES_DIR, screenshot?.replace(".png", `_${i + 1}.png`))) ?
                 `<img src="./${screenshot.replace(".png", `_${i + 1}.png`)}" alt="${screenshot.replace(".png", `_${i + 1}.png`)} screenshot" class="w-full h-auto rounded" />` :
                 '<p class="text-gray-500">No screenshot available</p>'
             }
@@ -704,43 +866,17 @@ function combineIssueCards(issues) {
     `;
 }
 
-function readAllJsonAndPutIntoArray() {
-    const reports = [];
-    const filePath = getOutputPath(PAGES_DIR);
-    const files = getReportFiles();
-    files.forEach(file => {
-        const report = JSON.parse(fs.readFileSync(path.join(filePath, file), 'utf8'));
-        reports.push(report);
-    });
-    return reports;
-}
-
-function generateSummaryCart(reports) {
-    const violationsRulesTotalCount = reports.reduce((sum, report) => {
-        return sum + (report.violations ? report.violations.length : 0);
-    }, 0);
-    const violationElementsTotalCount = reports.reduce((sum, report) => {
-        return sum + (report.violations ? report.violations.reduce((acc, violation) => acc + (violation.nodes ? violation.nodes.length : 0), 0) : 0);
-    }, 0);
-
-    const incompleteRulesTotalCount = reports.reduce((sum, report) => {
-        return sum + (report.incomplete ? report.incomplete.length : 0);
-    }, 0);
-
-    const incompleteElementsTotalCount = reports.reduce((sum, report) => {
-        return sum + (report.incomplete ? report.incomplete.reduce((acc, incomplete) => acc + (incomplete.nodes ? incomplete.nodes.length : 0), 0) : 0);
-    }, 0);
-
-    const passesRulesTotalCount = reports.reduce((sum, report) => {
-        return sum + (report.passes ? report.passes.length : 0);
-    }, 0);
-
-    const passesElementsTotalCount = reports.reduce((sum, report) => {
-        return sum + (report.passes ? report.passes.reduce((acc, pass) => acc + (pass.nodes ? pass.nodes.length : 0), 0) : 0);
-    }, 0);
-
-    const totalRulesReports = violationsRulesTotalCount + incompleteRulesTotalCount + passesRulesTotalCount;
-    const totalElementsReports = violationElementsTotalCount + incompleteElementsTotalCount + passesElementsTotalCount;
+function generateSummaryCart(stats) {
+    const {
+        violationsRulesTotalCount,
+        violationElementsTotalCount,
+        incompleteRulesTotalCount,
+        incompleteElementsTotalCount,
+        passesRulesTotalCount,
+        passesElementsTotalCount,
+        totalRulesReports,
+        totalElementsReports
+    } = stats.summary;
 
     return `
     <div class="icon-cards">
@@ -788,69 +924,8 @@ function generateSummaryCart(reports) {
     `
 }
 
-function generateTableCards(reports) {
-    // Add sorting state and logic
-    const columns = [
-        {key: 'page', label: 'Page'},
-        {key: "critical_elements", label: "Critical Elements"},
-        {key: "serious_elements", label: "Serious Elements"},
-        {key: 'moderate_elements', label: 'Moderate Elements'},
-        {key: 'minor_elements', label: 'Minor Elements'},
-        {key: 'violations', label: 'Violations Rules'},
-        {key: 'incomplete', label: 'Incomplete Rules'},
-        {key: 'passes', label: 'Passes Rules'},
-        {key: 'inapplicable', label: 'Inapplicable Rules'},
-        {key: 'impacts', label: 'Impacts'}
-    ];
-    // Prepare data for sorting
-    let tableData = reports.map(report => {
-        //const standard = report.standard || 'N/A';
-        const violationsList = report.violations || [];
-        const incompleteList = report.incomplete || [];
-
-        // Single pass over violations + incomplete tallies both element-level
-        // (per affected node) and rule-level impact counts, instead of spreading
-        // and re-scanning the arrays once per impact bucket.
-        let critical_elements = 0, serious_elements = 0, moderate_elements = 0, minor_elements = 0;
-        let critical = 0, serious = 0, moderate = 0, none = 0;
-        const tally = issue => {
-            if (issue.impact === 'critical') critical++;
-            else if (issue.impact === 'serious') serious++;
-            else if (issue.impact === 'moderate') moderate++;
-            else none++;
-            for (const node of (issue.nodes || [])) {
-                if (node.impact === 'critical') critical_elements++;
-                else if (node.impact === 'serious') serious_elements++;
-                else if (node.impact === 'moderate') moderate_elements++;
-                else if (node.impact === 'minor') minor_elements++;
-            }
-        };
-        violationsList.forEach(tally);
-        incompleteList.forEach(tally);
-
-        const violations = violationsList.length;
-        const incomplete = incompleteList.length;
-        const passes = report.passes ? report.passes.length : 0;
-        const inapplicable = report.inapplicable ? report.inapplicable.length : 0;
-        return {
-            id: report.id,
-            pagePath: report.pagePath || report.id,
-            critical_elements,
-            serious_elements,
-            moderate_elements,
-            minor_elements,
-            violations,
-            incomplete,
-            passes,
-            inapplicable,
-            critical,
-            serious,
-            moderate,
-            none,
-            impactsSortKey: [critical_elements, serious_elements, moderate_elements, minor_elements, critical, serious, moderate, none],
-            //standard
-        };
-    });
+function generateTableCards(stats) {
+    let tableData = stats.tableRows.slice();
 
     // Default sort: Violations desc
     let sortKey = 'critical_elements';
@@ -858,8 +933,8 @@ function generateTableCards(reports) {
 
     // Table header with sort icons
     function getSortIcon(col) {
-        if (sortKey !== col) return '<span class="sort-icon" style="display:inline-block;width:1em;"></span>';
-        return sortDir === 'asc' ? '<span class="sort-icon" style="display:inline-block;width:1em;">↑</span>' : '<span class="sort-icon" style="display:inline-block;width:1em;">↓</span>';
+        const icon = sortKey === col ? (sortDir === 'asc' ? '↑' : '↓') : '';
+        return `<span class="sort-icon" data-sort-icon="${col}" style="display:inline-block;width:1em;">${icon}</span>`;
     }
 
     let tableHeader = `
@@ -903,8 +978,18 @@ function generateTableCards(reports) {
 
     function renderTableRows() {
         return tableData.map(row => `
-            <tr class="clickable-report-row" data-href="./pages/${row.id}.html" tabindex="0" role="link" aria-label="Open report for ${escapeHTML(row.pagePath)}">
-                <td class="url-cell border-col"><a href="./pages/${row.id}.html">${row.pagePath}</a></td>
+            <tr class="clickable-report-row"
+                data-href="./pages/${row.id}.html"
+                data-sort-page-path="${escapeHTML(row.pagePath)}"
+                data-sort-critical-elements="${row.critical_elements}"
+                data-sort-serious-elements="${row.serious_elements}"
+                data-sort-moderate-elements="${row.moderate_elements}"
+                data-sort-minor-elements="${row.minor_elements}"
+                data-sort-violations="${row.violations}"
+                tabindex="0"
+                role="link"
+                aria-label="Open report for ${escapeHTML(row.pagePath)}">
+                <td class="url-cell border-col"><a href="./pages/${row.id}.html">${escapeHTML(row.pagePath)}</a></td>
                 <td class="status-cell critical_elements center-cell">${row.critical_elements}</td>
                 <td class="status-cell serious_elements center-cell">${row.serious_elements}</td>
                 <td class="status-cell moderate_elements center-cell">${row.moderate_elements}</td>
@@ -934,54 +1019,36 @@ function generateTableCards(reports) {
         (function() {
             let sortKey = '${sortKey}';
             let sortDir = '${sortDir}';
-            const tableData = ${JSON.stringify(tableData)};
-            function getSortIcon(col) {
-                if (sortKey !== col) return '<span class="sort-icon" style="display:inline-block;width:1em;">&nbsp;</span>';
-                return sortDir === 'asc' ? '<span class="sort-icon" style="display:inline-block;width:1em;">↑</span>' : '<span class="sort-icon" style="display:inline-block;width:1em;">↓</span>';
-            }
-            function escapeAttribute(value) {
-                return String(value ?? '')
-                    .replace(/&/g, '&amp;')
-                    .replace(/"/g, '&quot;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;');
-            }
-            function sortTableData() {
-                tableData.sort(function(a, b) {
-                    if (sortKey === 'pagePath') {
-                        return (sortDir === 'asc' ? 1 : -1) * a.pagePath.localeCompare(b.pagePath);
-                    } else if (typeof a[sortKey] === 'string') {
-                        return (sortDir === 'asc' ? 1 : -1) * a[sortKey].localeCompare(b[sortKey]);
-                    } else {
-                        return sortDir === 'asc' ? (a[sortKey] - b[sortKey]) : (b[sortKey] - a[sortKey]);
-                    }
+            const tbody = document.getElementById('table-body');
+            function sortAttributeFor(key) {
+                return 'data-sort-' + key.replace(/_/g, '-').replace(/[A-Z]/g, function(letter) {
+                    return '-' + letter.toLowerCase();
                 });
             }
-            function renderTableRows() {
-                return tableData.map(function(row) {
-                    return '<tr class="clickable-report-row" data-href="./pages/' + row.id + '.html" tabindex="0" role="link" aria-label="Open report for ' + escapeAttribute(row.pagePath) + '">' +
-                        '<td class="url-cell border-col"><a href="./pages/' + row.id + '.html">' + row.pagePath + '</a></td>' +
-                        '<td class="status-cell critical_elements center-cell">' + row.critical_elements + '</td>' +
-                        '<td class="status-cell serious_elements center-cell">' + row.serious_elements + '</td>' +
-                        '<td class="status-cell moderate_elements center-cell">' + row.moderate_elements + '</td>' +
-                        '<td class="status-cell minor_elements center-cell">' + row.minor_elements + '</td>' +
-                        '<td class="center-cell">' +
-                            '<span class="violation-badge violations">' + row.violations + ' Violations</span> ' +
-                            '<span class="violation-badge incomplete">' + row.incomplete + ' Incomplete</span> ' +
-                            '<span class="violation-badge passes">' + row.passes + ' Passes</span>' +
-                        '</td>' +
-                    '</tr>';
-                }).join('');
+            function sortValue(row, key) {
+                const value = row.getAttribute(sortAttributeFor(key)) || '';
+                return key === 'pagePath' ? value : Number(value);
+            }
+            function updateSortIcons() {
+                document.querySelectorAll('#sortable-table [data-sort-icon]').forEach(function(icon) {
+                    const col = icon.getAttribute('data-sort-icon');
+                    icon.textContent = col === sortKey ? (sortDir === 'asc' ? '↑' : '↓') : '';
+                });
             }
             function updateTable() {
-                sortTableData();
-                document.getElementById('table-body').innerHTML = renderTableRows();
-                // Update sort icons
-                document.querySelectorAll('#sortable-table th[data-sort]').forEach(function(th) {
-                    const col = th.getAttribute('data-sort');
-                    const textContent = th.textContent.replace(/[⇅↑↓]/g, '').trim();
-                    th.innerHTML = textContent + (col === sortKey ? ' ' + getSortIcon(col) : '');
+                const rows = Array.from(tbody.querySelectorAll('tr.clickable-report-row'));
+                rows.sort(function(a, b) {
+                    const aValue = sortValue(a, sortKey);
+                    const bValue = sortValue(b, sortKey);
+                    if (typeof aValue === 'string') {
+                        return (sortDir === 'asc' ? 1 : -1) * aValue.localeCompare(bValue);
+                    }
+                    return sortDir === 'asc' ? (aValue - bValue) : (bValue - aValue);
                 });
+                rows.forEach(function(row) {
+                    tbody.appendChild(row);
+                });
+                updateSortIcons();
             }
             document.querySelectorAll('#sortable-table th[data-sort]').forEach(function(th) {
                 th.style.cursor = 'pointer';
@@ -1019,26 +1086,11 @@ function generateTableCards(reports) {
     return tableHtml;
 }
 
-function generateImpactDistribution(reports) {
-    const countImpacts = (reports, impact) => {
-        return reports.reduce((count, report) => {
-            ['violations', 'incomplete'].forEach(section => {
-                if (report[section]?.filter(v => v.impact === impact).length > 0) {
-                    report[section]?.filter(v => v.impact === impact).forEach(item => {
-                        count += item.nodes.length;
-                    });
-                }
-                //count += report[section]?.filter(v => v.impact === impact)?.nodes.length || 0;
-            });
-            return count;
-        }, 0);
-    };
-
-
-    const totalCritical = countImpacts(reports, "critical");
-    const totalSerious = countImpacts(reports, "serious");
-    const totalModerate = countImpacts(reports, "moderate");
-    const totalMinor = countImpacts(reports, "minor");
+function generateImpactDistribution(stats) {
+    const totalCritical = stats.impactDistribution.Critical;
+    const totalSerious = stats.impactDistribution.Serious;
+    const totalModerate = stats.impactDistribution.Moderate;
+    const totalMinor = stats.impactDistribution.Minor;
 
     return `
                 <div class="chart">
@@ -1080,44 +1132,9 @@ function generateImpactDistribution(reports) {
 </div>`;
 }
 
-function generateDisabilityAffected(reports, affectedIndex) {
-    const disabilitiesArray = [];
-    reports.forEach(report => {
-        report.violations.forEach(violation => {
-            const rule = affectedIndex.get(violation.id);
-            if (rule && rule['disabilityTypesAffected']) {
-                rule['disabilityTypesAffected'].forEach(disability => {
-                    disabilitiesArray.push(disability.name);
-                });
-            }
-        });
-
-        report.incomplete.forEach(incomplete => {
-            const rule = affectedIndex.get(incomplete.id);
-            if (rule && rule['disabilityTypesAffected']) {
-                rule['disabilityTypesAffected'].forEach(disability => {
-                    disabilitiesArray.push(disability.name);
-                });
-            }
-        });
-
-        report.passes.forEach(passes => {
-            const rule = affectedIndex.get(passes.id);
-            if (rule && rule['disabilityTypesAffected']) {
-                rule['disabilityTypesAffected'].forEach(disability => {
-                    disabilitiesArray.push(disability.name);
-                });
-            }
-        });
-    });
-    const totalReportsWithAllIssues = reports.reduce((sum, report) => {
-        return sum + (report.violations.length + report.incomplete.length + report.passes.length);
-    }, 0);
-
-    const disabilityCounts = disabilitiesArray.reduce((acc, disability) => {
-        acc[disability] = (acc[disability] || 0) + 1;
-        return acc;
-    }, {});
+function generateDisabilityAffected(stats) {
+    const disabilityCounts = stats.disabilityCounts;
+    const totalReportsWithAllIssues = stats.disabilityIssueTotal || 1;
 
     return `
      <div class="chart">
@@ -1197,9 +1214,8 @@ function updateBugReportButtonBadge() {
 
 // Main function to generate the report
 function generateReport(reports, template, affectedIndex) {
-    // Build each page's HTML synchronously, then write them all concurrently
-    // rather than blocking on one fs.writeFileSync at a time.
-    return Promise.all(reports.map(report => {
+    const concurrency = getReportConcurrency();
+    return mapWithConcurrency(reports, concurrency, report => {
         let baseContent = generateBaseContent(template, report);
         //let searchBar = generateSearchBar();
         let tabs = generateTabs(report);
@@ -1217,18 +1233,18 @@ function generateReport(reports, template, affectedIndex) {
 
         const id = report.id || normalizePath(report.url)
         return fs.promises.writeFile(getOutputPath(PAGES_DIR, id + ".html"), baseContent, 'utf8');
-    }));
+    });
 }
 
-function generateDashboard(reports, template, affectedIndex) {
+function generateDashboard(reports, template, stats) {
     const outputPath = getOutputPath('index.html');
 
     let dashboardBody = generateBaseDashboard(template);
-    const summaryCards = generateSummaryCart(reports);
+    const summaryCards = generateSummaryCart(stats);
     const dashboardSearchBar = generateDashboardSearchBar();
-    const tableCards = generateTableCards(reports);
-    const impactDistributionChart = generateImpactDistribution(reports);
-    const disabilityAffected = generateDisabilityAffected(reports, affectedIndex);
+    const tableCards = generateTableCards(stats);
+    const impactDistributionChart = generateImpactDistribution(stats);
+    const disabilityAffected = generateDisabilityAffected(stats);
 
     dashboardBody = dashboardBody.replace('{{summary_cards}}', summaryCards);
     dashboardBody = dashboardBody.replace('{{impact_distribution_chart}}', impactDistributionChart);
@@ -1278,7 +1294,7 @@ function deduplicate(strategy) {
     });
 
     if (strategy === 'none') {
-        return;
+        return reports.map(report => report.data);
     }
 
     if (strategy === 'exact') {
@@ -1300,7 +1316,8 @@ function deduplicate(strategy) {
             }
         }
         deleteReportsByUuid(toDelete);
-        return;
+        const deleted = new Set(toDelete);
+        return reports.filter(report => !deleted.has(report.uuid)).map(report => report.data);
     }
 
     if (strategy === 'best') {
@@ -1315,13 +1332,18 @@ function deduplicate(strategy) {
                 continue;
             }
 
+            const reportViolations = getIssues(report.data, 'violations');
+            const reportIncomplete = getIssues(report.data, 'incomplete');
+            const existingViolations = existing ? getIssues(existing.data, 'violations') : [];
+            const existingIncomplete = existing ? getIssues(existing.data, 'incomplete') : [];
+
             if (
                 !existing ||
-                report.data.violations.length > existing.data.violations.length ||
-                (report.data.violations.length === existing.data.violations.length &&
-                    report.data.incomplete.length > existing.data.incomplete.length) ||
-                (report.data.violations.length === existing.data.violations.length &&
-                    report.data.incomplete.length === existing.data.incomplete.length &&
+                reportViolations.length > existingViolations.length ||
+                (reportViolations.length === existingViolations.length &&
+                    reportIncomplete.length > existingIncomplete.length) ||
+                (reportViolations.length === existingViolations.length &&
+                    reportIncomplete.length === existingIncomplete.length &&
                     report.timestamp > existing.timestamp)
             ) {
                 if (existing) toDelete.push(existing.uuid);
@@ -1332,10 +1354,14 @@ function deduplicate(strategy) {
         }
 
         deleteReportsByUuid(toDelete);
+        const deleted = new Set(toDelete);
+        return reports.filter(report => !deleted.has(report.uuid)).map(report => report.data);
     }
+
+    return reports.map(report => report.data);
 }
 
-function generateCategoryImpactSummary(print = true, reports = null) {
+function generateCategoryImpactSummary(print = true, reports = null, stats = null) {
     if (!reports) {
         reports = getReportFiles().map(file => {
             const filePath = getOutputPath(PAGES_DIR, file);
@@ -1352,73 +1378,7 @@ function generateCategoryImpactSummary(print = true, reports = null) {
         return impactSummary;
     }
 
-    // Violations
-
-    const vCritical = reports
-        .flatMap(report => report.violations.flatMap(v => v.nodes))
-        .filter(node => node.impact === 'critical') // filter nodes directly
-        .length;
-
-    const vSerious = reports
-        .flatMap(report => report.violations.flatMap(v => v.nodes))
-        .filter(node => node.impact === 'serious') // filter nodes directly
-        .length;
-
-    const vModerate = reports
-        .flatMap(report => report.violations.flatMap(v => v.nodes))
-        .filter(node => node.impact === 'moderate') // filter nodes directly
-        .length;
-
-    const vMinor = reports
-        .flatMap(report => report.violations.flatMap(v => v.nodes))
-        .filter(node => node.impact === 'minor') // filter nodes directly
-        .length;
-
-    // Incomplete
-    const iCritical = reports
-        .flatMap(report => report.incomplete.flatMap(v => v.nodes))
-        .filter(node => node.impact === 'critical') // filter nodes directly
-        .length;
-
-    const iSerious = reports
-        .flatMap(report => report.incomplete.flatMap(v => v.nodes))
-        .filter(node => node.impact === 'serious') // filter nodes directly
-        .length;
-
-    const iModerate = reports
-        .flatMap(report => report.incomplete.flatMap(v => v.nodes))
-        .filter(node => node.impact === 'moderate') // filter nodes directly
-        .length;
-    const iMinor = reports
-        .flatMap(report => report.incomplete.flatMap(v => v.nodes))
-        .filter(node => node.impact === 'minor') // filter nodes directly
-        .length;
-
-    const inapplicable = reports
-        .flatMap(report => report.inapplicable.flatMap(v => v.nodes))
-        .length;
-    const passed = reports
-        .flatMap(report => report.passes.flatMap(v => v.nodes))
-        .length;
-
-    const impactSummary = {
-        "Violations": {
-            "Critical": vCritical,
-            "Serious": vSerious,
-            "Moderate": vModerate,
-            "Minor": vMinor
-        }
-        ,
-        "Incomplete": {
-            "Critical": iCritical,
-            "Serious": iSerious,
-            "Moderate": iModerate,
-            "Minor": iMinor
-        }
-        ,
-        "Passed": passed,
-        "Inapplicable": inapplicable
-    }
+    const impactSummary = (stats || buildReportStats(reports)).impactSummary;
 
     fs.writeFileSync(getOutputPath('impactSummary.json'), JSON.stringify(impactSummary, null, 2), 'utf-8');
     if (print) {
@@ -1455,11 +1415,13 @@ function generateCategoryImpactSummary(print = true, reports = null) {
     return impactSummary;
 }
 
-function test(allowFailure = false, delayTermination = false) {
+function test(allowFailure = false, delayTermination = false, reports = null, stats = null) {
     const violationThreshold = process.env.VIOLATION_THRESHOLD
     const incompleteThreshold = process.env.INCOMPLETE_THRESHOLD
-    const hasReports = getReportFiles().length > 0;
-    const res = generateCategoryImpactSummary(false);
+    const preparedReports = reports || deduplicate(MERGE_STRATEGY);
+    const preparedStats = stats || buildReportStats(preparedReports);
+    const hasReports = preparedReports.length > 0;
+    const res = generateCategoryImpactSummary(false, preparedReports, preparedStats);
     let fail = false;
     const colors = {
         reset: "\x1b[0m",
@@ -1566,36 +1528,43 @@ function normalizePath(url) {
     return path || "root";
 }
 
+function loadAffectedIndexForReports(reports) {
+    const version = reports[0]?.testEngine?.version;
+    if (!version) return new Map();
+
+    const dirname = __dirname.replace(/\/dist$/, '');
+    const affectedPath = path.join(dirname, "disabilityAffectedData", `${getAxeVersion(version)}.json`);
+    if (!fs.existsSync(affectedPath)) return new Map();
+
+    return buildAffectedIndex(readJSONFile(affectedPath));
+}
 
 async function main() {
     console.log("Generating Accessibility Reports...");
     if (getReportFiles().length === 0) {
         console.log("No accessibility scan results found. Skipping report generation.");
-        return;
+        return {reports: [], stats: buildReportStats([])};
     }
 
-    deduplicate(MERGE_STRATEGY);
-
-    // Read & parse the (deduplicated) scan results once, then share them with
-    // every consumer instead of re-reading the corpus from disk for each.
-    const reports = readAllJsonAndPutIntoArray();
-    if (reports.length === 0) return;
+    const reports = deduplicate(MERGE_STRATEGY);
+    if (reports.length === 0) return {reports, stats: buildReportStats(reports)};
 
     const dirname = __dirname.replace(/\/dist$/, '');
     const template = fs.readFileSync(path.join(dirname, './index.template.html'), 'utf8');
-    const affected = readJSONFile(dirname + "/disabilityAffectedData/" + getAxeVersion(reports[0].testEngine.version) + ".json");
-    const affectedIndex = buildAffectedIndex(affected);
+    const affectedIndex = loadAffectedIndexForReports(reports);
+    const stats = buildReportStats(reports, affectedIndex);
 
-    generateCategoryImpactSummary(true, reports);
+    generateCategoryImpactSummary(true, reports, stats);
     await generateReport(reports, template, affectedIndex);
-    generateDashboard(reports, template, affectedIndex);
+    generateDashboard(reports, template, stats);
 
     fs.copyFileSync(path.join(dirname, './styles.css'), getOutputPath('./styles.css'));
     fs.copyFileSync(path.join(dirname, './main.js'), getOutputPath('./main.js'));
 
+    return {reports, stats};
 }
 
-module.exports = {main, deduplicate, cleanUp, test};
+module.exports = {main, deduplicate, cleanUp, test, buildReportStats, generateCategoryImpactSummary};
 
 if (require.main === module) {
     main().catch(err => {
