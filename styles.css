@@ -33,7 +33,6 @@
     --attention-deficit-color: #7f7f7f;
     --sighted-keyboard-users-color: #bcbd22;
     --dyslexia-color: #17becf;
-    --color-background: #f8f9fa;
 }
 
 #bugReportModal {
@@ -138,6 +137,28 @@ th {
     font-weight: 600;
 }
 
+.viewport-badge {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 0.5rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    background-color: #eef2ff;
+    color: #4338ca;
+    border: 1px solid #c7d2fe;
+    vertical-align: middle;
+}
+
+.viewport-badge--desktop {
+    background-color: #f1f5f9;
+    color: #475569;
+    border-color: #cbd5e1;
+}
+
 body {
     font-family: var(--font-family);
     margin: 0;
@@ -146,8 +167,6 @@ body {
     background-color: #f8f9fa;
     transition: all 0.3s ease;
 }
-
-.container {}
 
 header {
     display: flex;
@@ -472,29 +491,14 @@ h1 {
 .chart-title {
     font-size: 16px;
     font-weight: 600;
-    margin-bottom: 15px;
+    margin-bottom: 4px;
 }
 
-
-/*.impact-circle {*/
-
-
-/*    width: 200px;*/
-
-
-/*    height: 200px;*/
-
-
-/*    border-radius: 50%;*/
-
-
-/*    position: relative;*/
-
-
-/*    background: conic-gradient(var(--danger) 0% 40%, var(--warning) 40% 65%, var(--info) 65% 85%, #999 85% 100%);*/
-
-
-/*}*/
+.chart-subtitle {
+    font-size: 12px;
+    color: var(--color-neutral);
+    margin: 0 0 12px 0;
+}
 
 #pagination-controls {
     display: flex;
@@ -601,38 +605,6 @@ h1 {
     border-color: #007bff;
 }
 
-
-/*.impact-circle::after {*/
-
-
-/*    content: "";*/
-
-
-/*    position: absolute;*/
-
-
-/*    top: 50%;*/
-
-
-/*    left: 50%;*/
-
-
-/*    transform: translate(-50%, -50%);*/
-
-
-/*    width: 70%;*/
-
-
-/*    height: 70%;*/
-
-
-/*    border-radius: 50%;*/
-
-
-/*    background-color: white;*/
-
-
-/*}*/
 
 .impact-legend {
     display: flex;
@@ -1442,4 +1414,169 @@ th.active .sort-icon {
 .no-results-message button:focus {
     outline: none;
     box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.5);
+}
+
+
+/* Overall health banner (dashboard) */
+
+.health-banner {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px 24px;
+    background: white;
+    border-radius: 8px;
+    border-left: 6px solid var(--color-neutral);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+    padding: 16px 20px;
+    margin-bottom: 20px;
+}
+
+.health-banner--good {
+    border-left-color: var(--color-success);
+}
+
+.health-banner--warn {
+    border-left-color: var(--color-moderate);
+}
+
+.health-banner--poor {
+    border-left-color: var(--color-critical);
+}
+
+.health-score {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.1;
+    min-width: 120px;
+}
+
+.health-score-value {
+    font-size: 32px;
+    font-weight: 700;
+    color: var(--color-text);
+}
+
+.health-banner--good .health-score-value {
+    color: var(--color-success);
+}
+
+.health-banner--warn .health-score-value {
+    color: var(--color-moderate);
+}
+
+.health-banner--poor .health-score-value {
+    color: var(--color-critical);
+}
+
+.health-score-label {
+    font-size: 13px;
+    color: var(--color-neutral);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.health-meter {
+    flex: 1;
+    min-width: 160px;
+    height: 10px;
+    background: #e9ecef;
+    border-radius: 999px;
+    overflow: hidden;
+}
+
+.health-meter-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--color-neutral);
+}
+
+.health-banner--good .health-meter-fill {
+    background: var(--color-success);
+}
+
+.health-banner--warn .health-meter-fill {
+    background: var(--color-moderate);
+}
+
+.health-banner--poor .health-meter-fill {
+    background: var(--color-critical);
+}
+
+.health-detail {
+    flex-basis: 100%;
+    margin: 0;
+    font-size: 13px;
+    color: var(--color-neutral);
+}
+
+
+/* Summary card title colours (replaces inline styles) */
+
+.icon-title--violations {
+    color: var(--color-critical);
+}
+
+.icon-title--incomplete {
+    color: var(--color-serious);
+}
+
+.icon-title--passes {
+    color: var(--color-success);
+}
+
+
+/* Issue impact badge palette (aligned with severity tokens) */
+
+.issue-impact {
+    background-color: var(--color-neutral);
+}
+
+.issue-impact--critical {
+    background-color: var(--color-critical);
+}
+
+.issue-impact--serious {
+    background-color: var(--color-serious);
+}
+
+.issue-impact--moderate {
+    background-color: var(--color-moderate);
+}
+
+.issue-impact--minor {
+    background-color: var(--color-minor);
+}
+
+
+/* Per-disability pill with colour dot (matches dashboard palette) */
+
+.disability-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--color-border);
+    background: white;
+    color: #374151;
+    font-size: 0.875rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.25rem;
+}
+
+.disability-pill::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--dot, #9467bd);
+    flex-shrink: 0;
+}
+
+
+/* Generate Bug Summary button: readable disabled state */
+
+.bug-report-btn:disabled {
+    background-color: #e5e7eb;
+    color: #6b7280;
+    cursor: not-allowed;
 }

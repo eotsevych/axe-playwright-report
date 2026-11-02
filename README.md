@@ -67,6 +67,33 @@ class MyTest {
 >
 > **Not-applicable ❌**: `new sideMenu(page.locator('#sideMenu'))`
 
+#### Scanning multiple viewports (desktop & mobile)
+
+By default `@axeScan()` scans the page at its current (desktop) viewport. You can also scan
+responsive/mobile layouts by passing viewport names to the decorator:
+
+```typescript
+@axeScan('mobile')              // scan desktop AND mobile
+async testHomePage() { /* ... */ }
+
+@axeScan('mobile', '~desktop')  // scan mobile ONLY (drop the default desktop pass)
+async testCheckout() { /* ... */ }
+
+@axeScan('mobile', 'tablet')    // scan desktop, mobile AND tablet
+async testProduct() { /* ... */ }
+```
+
+- `desktop` is always the default. A bare name (e.g. `mobile`) **adds** a viewport; a
+  tilde-prefixed name (e.g. `~desktop`) **removes** one.
+- Named viewports and their sizes are declared globally via the `VIEWPORTS` env option
+  (see below). `desktop` is reserved — it always means the test's natural viewport.
+- For each extra viewport the page is resized with Playwright's `setViewportSize`, which
+  re-applies your responsive CSS **without reloading the page**, so any in-progress form
+  state is preserved. The original layout is restored after scanning.
+- Each viewport produces its own report entry, tagged with the viewport name (shown as a
+  badge in the dashboard and in the per-page header), so a page's desktop and mobile
+  results are kept side by side rather than merged.
+
 ### 2. Configure scan options (optional)
 
 Having accessibility env file gives you the flexibility to customize your scan settings.
@@ -77,6 +104,7 @@ With the config file it allows:
 - choose screenshot scope and cap screenshots per scanned page
 - enable/disable storing axe `passes` results (default: `on`)
 - persist compact report JSON instead of the full axe payload
+- declare named viewports (mobile, tablet, …) so tests can scan responsive layouts
 - filter rules by axe-core tags (default: `no filtering, all rules included`)
 - merge reports strategy (default: `best`)
     - `none` - keep all reports,
@@ -103,6 +131,7 @@ MAX_SCREENSHOTS_PER_PAGE=10
 INCLUDE_PASSES=on
 RESULT_MODE=compact
 REPORT_CONCURRENCY=4
+VIEWPORTS=mobile:390x844,tablet:768x1024
 CUSTOM_REG_EXP='["^\/\w+-\w+-\w+\.html$", "\/([^\/]*-[^\/]*)"]'
 TAGS=wcag2a,wcag2aa
 WITH_RULES=color-contrast,image-alt
@@ -112,13 +141,14 @@ EXCLUDE='.main-content .footer'
 ```
 
 - `SCAN`: Set to `on` to enable scanning.
-- `OUTPUT_DIR`: Directory for report output (default: `axe-playwright-report`).
+- `OUTPUT_DIR`: Directory for report output (default: `axe-playwright-report`). Use a dedicated folder: each run removes the report files it wrote before (`pages/`, `index.html`, `impactSummary.json`, `styles.css`, `main.js`), and the project folder itself is refused.
 - `SCREENSHOT`: Set to `on` to capture screenshots of issues.
 - `SCREENSHOT_MODE`: Set to `all`, `violations`, or `off` (default: `all` when screenshots are enabled).
 - `MAX_SCREENSHOTS_PER_PAGE`: Maximum screenshots to capture for one scanned page.
 - `INCLUDE_PASSES`: Set to `off` to skip storing axe `passes` results in the report JSON. Passes are the largest and least-read part of a scan, so disabling them yields smaller report files and faster dashboard generation, at the cost of the "Passes" counts showing `0`. Default: `on`.
 - `RESULT_MODE`: Set to `compact` to persist only fields required by the dashboard, or `full` for the full axe payload. Default: `full`.
 - `REPORT_CONCURRENCY`: Maximum number of per-page HTML reports generated in parallel. Default: up to `4`.
+- `VIEWPORTS`: Comma-separated list of named viewports as `name:WIDTHxHEIGHT` (e.g. `mobile:390x844,tablet:768x1024`). Referenced by name in `@axeScan('mobile')`. `desktop` is reserved and always means the test's natural viewport.
 - `TAGS`: Comma-separated list of axe-core tags to filter rules.
 - `WITH_RULES`: Comma-separated list of axe-core rule IDs to run.
 - `EXCLUDE_RULES`: Comma-separated list of axe-core rule IDs to exclude from running.
@@ -182,16 +212,16 @@ export default defineConfig({
     reporter: [
         ['axe-playwright-report/axeBuildReport',
             {
-                softAssert: true // if true, the process will not fail if there are accessibility issues. Default: false.
+                softAssert: true // true: exceeded thresholds are warnings; false: they fail the run. Omit to skip the threshold check.
             }
         ],
     ],
 });
 ```
 `softAssert` parameter is optional and used for controlling the 'test' command behavior within the following cases:
-- `true`: the process will fail if there are accessibility issues.
-- `false`: the process will not fail if there are accessibility issues.
-- not specified: the test command will be not initiated, a process will not fail if there are accessibility issues.
+- `true`: thresholds are checked and reported as warnings; the run does not fail.
+- `false`: thresholds are checked and the run fails if any is exceeded.
+- not specified: thresholds are not checked; only the report is generated.
 
 
 ## CI/CD Pipeline Integration
@@ -201,7 +231,7 @@ npx axe-playwright-report test
 ```
 This command deduplicates reports and enforces accessibility baselines without generating the full HTML dashboard. Use `npx axe-playwright-report test --build-report` when you also want the dashboard generated during the quality gate.
 
-It enforces accessibility baselines according provided `VIOLATION_THRESHOLD` and `INCOMPLETE_THRESHOLD` in array format by **Critical** and **Serious** impact separated by comma.
+It enforces accessibility baselines according provided `VIOLATION_THRESHOLD` and `INCOMPLETE_THRESHOLD`: comma-separated maximum counts in the order **Critical**, **Serious**, **Moderate**, **Minor**. Leave a slot blank to skip that impact (e.g. `0,,5`); a value that is not a number stops with an error.
 For example:
 ```
 VIOLATION_THRESHOLD=10,10
@@ -236,7 +266,7 @@ npm test           # run the test suite with the built-in Node test runner
 npm run benchmark:report -- --reports=100 --rules=4 --nodes=5
 ```
 
-`npm run typecheck` and `npm test` also run on every push and pull request via CI. The tests use Node's built-in [`node:test`](https://nodejs.org/api/test.html) runner, so no extra dependencies are required (Node 18+).
+`npm run typecheck` and `npm test` also run on every push and pull request via CI. The tests use Node's built-in [`node:test`](https://nodejs.org/api/test.html) runner, so no extra dependencies are required (Node 22+ for development).
 
 ## License
 

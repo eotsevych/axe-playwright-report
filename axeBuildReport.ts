@@ -1,6 +1,5 @@
 import type {Reporter} from '@playwright/test/reporter';
 import {main, cleanUp, test} from './buildReport';
-import {FullConfig} from "@playwright/test";
 
 class AxeReporter implements Reporter {
 
@@ -15,12 +14,9 @@ class AxeReporter implements Reporter {
     }
 
     async onEnd() {
-        if (this.softAssert === undefined) await main()
-        else {
-            const reportResult = await main()
-            const isFailed = test(this.softAssert, true, reportResult.reports, reportResult.stats)
-            if (isFailed) process.exit(1)
-        }
+        const {reports, stats} = await main()
+        // Return a status instead of exiting, so reporters listed after this one still finish.
+        if (this.softAssert !== undefined && test(this.softAssert, reports, stats)) return {status: 'failed' as const}
     }
 }
 

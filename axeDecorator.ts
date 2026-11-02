@@ -2,6 +2,8 @@ import {Locator, Page} from '@playwright/test';
 import AxeBuilder from "@axe-core/playwright";
 import {randomUUID} from 'crypto';
 import fs from 'fs';
+import path from 'path';
+import dotenv from 'dotenv';
 
 /**
  * A decorator that runs an accessibility scan using Axe after executing the decorated method.
@@ -29,7 +31,7 @@ import fs from 'fs';
  *   }
  * }
  */
-export function axeScan<This, Args extends any[], Return>() {
+export function axeScan<This, Args extends any[], Return>(...viewportTokens: string[]) {
     return function actualDecorator(target: (this: This, ...args: Args) => Promise<Return>) {
         async function scan(this: any, ...args: Args): Promise<Return> {
             const result = await target.apply(this, args);
@@ -43,68 +45,130 @@ export function axeScan<This, Args extends any[], Return>() {
                     return result;
                 }
 
-                let axeBuilder = new AxeBuilder({page});
-                if (accessibilityConfig.tags.length > 0) axeBuilder.withTags(accessibilityConfig.tags);
-                if (accessibilityConfig.withRules.length > 0) axeBuilder.withRules(accessibilityConfig.withRules);
-                if (accessibilityConfig.excludeRules.length > 0) axeBuilder.disableRules(accessibilityConfig.excludeRules);
-                if (accessibilityConfig.exclude.length > 0) {
-                    accessibilityConfig.exclude.forEach(locator  => axeBuilder.exclude(locator));
-                }
-                if (accessibilityConfig.include.length > 0) {
-                    accessibilityConfig.include.forEach(locator  => axeBuilder.include(locator));
-                }
+                const viewportsToScan = resolveViewports(viewportTokens);
+                // Remember the current layout so we can restore it after resizing.
+                // `setViewportSize` re-runs CSS media queries without reloading, so
+                // any in-progress form state on the page survives the mobile pass.
+                const originalViewport = page.viewportSize();
 
-                const accessibilityScanResults = await axeBuilder.analyze();
-
-                const id = randomUUID() + new Date().getTime().toString().slice(-4);
-                accessibilityScanResults['id'] = id;
-
-                let url = normalizeUrl(accessibilityScanResults.url, accessibilityConfig.customRegExp);
-                accessibilityScanResults['newUrl'] = url;
-                accessibilityScanResults['pagePath'] = url.replace(process.env.URL ?? "", "");
-                const violations = accessibilityScanResults.violations;
-                const incomplete = accessibilityScanResults.incomplete;
-
-                if (violations.length > 0 || incomplete.length > 0 || accessibilityScanResults.passes.length) {
-                    accessibilityScanResults['path'] = formatUrl(url);
-                    accessibilityScanResults['violationsScreenShot'] = `${id}_violations.png`;
-                    accessibilityScanResults['incompleteScreenShot'] = `${id}_incomplete.png`;
-                    accessibilityScanResults['inapplicableScreenShot'] = `${id}_inapplicable.png`;
-
-                    if (!fs.existsSync(accessibilityConfig.outputDir)) {
-                        fs.mkdirSync(accessibilityConfig.outputDir, {recursive: true});
-                    }
-
-                    // Drop passes from what we persist when disabled; the page is
-                    // still recorded (the membership check above already ran).
-                    if (!accessibilityConfig.includePasses) {
-                        accessibilityScanResults.passes = [];
-                    }
-
-                    const persistedResults = accessibilityConfig.resultMode === "compact"
-                        ? compactAxeResult(accessibilityScanResults)
-                        : accessibilityScanResults;
-
-                    fs.writeFileSync(`${accessibilityConfig.outputDir}/${accessibilityScanResults['id']}.json`, JSON.stringify(persistedResults, null, 2));
-
-                    if (accessibilityConfig.screenshots && accessibilityConfig.maxScreenshotsPerPage > 0) {
-                        let remainingScreenshots = accessibilityConfig.maxScreenshotsPerPage;
-                        const shouldCaptureViolations = accessibilityConfig.screenshotMode === "all" || accessibilityConfig.screenshotMode === "violations";
-                        if (shouldCaptureViolations) {
-                            const saved = await highlightEachIssuesAndSaveScreenshot(violations, page, "red", id + "_violations", accessibilityConfig.outputDir, remainingScreenshots);
-                            remainingScreenshots -= saved;
+                try {
+                    for (const viewport of viewportsToScan) {
+                        if (viewport === "desktop") {
+                            // Desktop scans at the test's natural size regardless of
+                            // where a previous (resized) pass left the viewport.
+                            if (originalViewport) await page.setViewportSize(originalViewport);
+                        } else {
+                            const size = accessibilityConfig.viewportSizes[viewport];
+                            if (!size) {
+                                console.warn(`No resolution configured for viewport "${viewport}". Add it to VIEWPORTS in .env.a11y (e.g. VIEWPORTS=${viewport}:390x844). Skipping.\n`);
+                                continue;
+                            }
+                            if (!originalViewport) {
+                                // A page created with `viewport: null` uses the real
+                                // browser window and cannot be resized/restored.
+                                console.warn(`Cannot scan viewport "${viewport}": the page has no fixed viewport (created with viewport: null), so it cannot be resized. Skipping.\n`);
+                                continue;
+                            }
+                            await page.setViewportSize(size);
                         }
 
-                        if (accessibilityConfig.screenshotMode === "all" && remainingScreenshots > 0) {
-                            await highlightEachIssuesAndSaveScreenshot(incomplete, page, "red", id + "_incomplete", accessibilityConfig.outputDir, remainingScreenshots);
-                        }
+                        await runAxeScanForViewport(page, accessibilityConfig, viewport);
                     }
+                } finally {
+                    // Reset the layout without reloading the page.
+                    if (originalViewport) await page.setViewportSize(originalViewport);
                 }
             }
             return result
         }
 
         return scan as (this: This, ...args: Args) => Promise<Return>;
+    }
+}
+
+/**
+ * Resolves the decorator's viewport tokens into an ordered list of viewports to
+ * scan. Desktop is always the default; bare tokens (e.g. `mobile`) add a
+ * viewport, and tilde-prefixed tokens (e.g. `~desktop`) remove one.
+ *
+ *   resolveViewports([])                    -> ["desktop"]
+ *   resolveViewports(["mobile"])            -> ["desktop", "mobile"]
+ *   resolveViewports(["mobile", "~desktop"]) -> ["mobile"]
+ */
+export function resolveViewports(tokens: string[]): string[] {
+    const list: string[] = ["desktop"];
+    for (const rawToken of tokens) {
+        const token = String(rawToken).trim().toLowerCase();
+        if (!token) continue;
+        if (token.startsWith("~")) {
+            const name = token.slice(1).trim();
+            const idx = list.indexOf(name);
+            if (idx !== -1) list.splice(idx, 1);
+        } else if (!list.includes(token)) {
+            list.push(token);
+        }
+    }
+    return list;
+}
+
+async function runAxeScanForViewport(page: Page, accessibilityConfig: any, viewport: string) {
+    let axeBuilder = new AxeBuilder({page});
+    if (accessibilityConfig.tags.length > 0) axeBuilder.withTags(accessibilityConfig.tags);
+    if (accessibilityConfig.withRules.length > 0) axeBuilder.withRules(accessibilityConfig.withRules);
+    if (accessibilityConfig.excludeRules.length > 0) axeBuilder.disableRules(accessibilityConfig.excludeRules);
+    if (accessibilityConfig.exclude.length > 0) {
+        accessibilityConfig.exclude.forEach((locator: string) => axeBuilder.exclude(locator));
+    }
+    if (accessibilityConfig.include.length > 0) {
+        accessibilityConfig.include.forEach((locator: string) => axeBuilder.include(locator));
+    }
+
+    const accessibilityScanResults = await axeBuilder.analyze();
+
+    const id = randomUUID();
+    accessibilityScanResults['id'] = id;
+    accessibilityScanResults['viewport'] = viewport;
+
+    let url = normalizeUrl(accessibilityScanResults.url, accessibilityConfig.customRegExp);
+    accessibilityScanResults['newUrl'] = url;
+    accessibilityScanResults['pagePath'] = url;
+    const violations = accessibilityScanResults.violations;
+    const incomplete = accessibilityScanResults.incomplete;
+
+    if (violations.length > 0 || incomplete.length > 0 || accessibilityScanResults.passes.length) {
+        accessibilityScanResults['path'] = formatUrl(url);
+        accessibilityScanResults['violationsScreenShot'] = `${id}_violations.png`;
+        accessibilityScanResults['incompleteScreenShot'] = `${id}_incomplete.png`;
+        accessibilityScanResults['inapplicableScreenShot'] = `${id}_inapplicable.png`;
+
+        if (!fs.existsSync(accessibilityConfig.outputDir)) {
+            fs.mkdirSync(accessibilityConfig.outputDir, {recursive: true});
+        }
+
+        // Drop passes from what we persist when disabled; the page is
+        // still recorded (the membership check above already ran).
+        if (!accessibilityConfig.includePasses) {
+            accessibilityScanResults.passes = [];
+        }
+
+        const persistedResults = accessibilityConfig.resultMode === "compact"
+            ? compactAxeResult(accessibilityScanResults)
+            : accessibilityScanResults;
+
+        fs.writeFileSync(`${accessibilityConfig.outputDir}/${accessibilityScanResults['id']}.json`, JSON.stringify(persistedResults, null, 2));
+
+        if (accessibilityConfig.screenshots && accessibilityConfig.maxScreenshotsPerPage > 0) {
+            let remainingScreenshots = accessibilityConfig.maxScreenshotsPerPage;
+            const shouldCaptureViolations = accessibilityConfig.screenshotMode === "all" || accessibilityConfig.screenshotMode === "violations";
+            if (shouldCaptureViolations) {
+                const saved = await highlightEachIssuesAndSaveScreenshot(violations, page, "red", id + "_violations", accessibilityConfig.outputDir, remainingScreenshots);
+                remainingScreenshots -= saved;
+            }
+
+            if (accessibilityConfig.screenshotMode === "all" && remainingScreenshots > 0) {
+                await highlightEachIssuesAndSaveScreenshot(incomplete, page, "red", id + "_incomplete", accessibilityConfig.outputDir, remainingScreenshots);
+            }
+        }
     }
 }
 
@@ -125,14 +189,13 @@ function isPlaywrightPage(prop: any): prop is Page {
 }
 
 function formatUrl(inputUrl: string): string {
-    const relativePath = inputUrl.replace(process.env.URL ?? "", "");
-    const path = relativePath.replace(/[^a-zA-Z0-9]/g, "-").replace(/^-+|-+$/g, "");
-    return path.startsWith("/") ? path : `/${path}`;
+    return "/" + inputUrl.replace(/[^a-zA-Z0-9]/g, "-").replace(/^-+|-+$/g, "");
 }
 
-function compactAxeResult(result: any) {
+export function compactAxeResult(result: any) {
     return {
         id: result.id,
+        viewport: result.viewport,
         url: result.url,
         newUrl: result.newUrl,
         pagePath: result.pagePath,
@@ -203,17 +266,19 @@ async function highlightEachIssuesAndSaveScreenshot(issues: any[], page: Page, c
         await page.screenshot({path: `${outputDir}/${fileName}_${i + 1}.png`});
         savedScreenshots++;
 
-        // Remove the highlights we actually applied for the current issue.
+        // Undo the highlights so the test continues on an unchanged page.
         for (const element of highlighted) {
             try {
                 await element.evaluate((el) => {
-                    el.style.outline = "none";
-                    const marker = el.querySelector(`[id^="marker-"]`);
-                    if (marker) {
-                        marker.textContent = "";
-                        marker.remove();
+                    const saved = el.getAttribute("data-axe-old-style");
+                    if (saved) {
+                        const [position, outline] = JSON.parse(saved);
+                        el.style.position = position;
+                        el.style.outline = outline;
+                        el.removeAttribute("data-axe-old-style");
                     }
-                }, {timeout: 250});
+                    el.querySelectorAll(":scope > [data-axe-marker]").forEach(marker => marker.remove());
+                }, undefined, {timeout: 250});
             } catch (ignore: any) {
             }
         }
@@ -221,88 +286,99 @@ async function highlightEachIssuesAndSaveScreenshot(issues: any[], page: Page, c
     return savedScreenshots;
 }
 
-// The config is read from disk and the regexes recompiled on every decorated
-// method call; cache it since it never changes during a run.
+// Read once per process. Same source and precedence as buildReport.js:
+// dotenv loads .env.a11y, and variables already set in the shell win.
 let cachedConfig: any = null;
-let cachedEnvPath: string | null = null;
 
-function loadEnvConfig(envPath: string = ".env.a11y") {
-    if (cachedConfig !== null && cachedEnvPath === envPath) return cachedConfig;
-
-    const defaultConfig = {
-        scan: true,
-        outputDir: "axe-playwright-report/pages",
-        screenshots: false,
-        screenshotMode: "all",
-        maxScreenshotsPerPage: Number.POSITIVE_INFINITY,
-        resultMode: "full",
-        includePasses: true,
-        tags: [] as string[],
-        withRules: [] as string[],
-        excludeRules: [] as string[],
-        include: [] as string[],
-        exclude: [] as string[],
-        customRegExp: [] as RegExp[],
+function loadEnvConfig() {
+    if (cachedConfig !== null) return cachedConfig;
+    dotenv.config({path: path.join(process.cwd(), ".env.a11y")});
+    const env = process.env;
+    const isOn = (name: string, fallback: boolean) => {
+        const value = env[name];
+        return value ? value.toUpperCase() === "ON" : fallback;
     };
+    const list = (name: string) => (env[name] || "").split(",").map(t => t.trim()).filter(Boolean);
+    const screenshotMode = normalizeScreenshotMode(env.SCREENSHOT_MODE || "all");
 
-    if (!fs.existsSync(envPath)) {
-        cachedConfig = defaultConfig;
-        cachedEnvPath = envPath;
-        return defaultConfig;
-    }
-
-    const content = fs.readFileSync(envPath, "utf-8");
-    const env: Record<string, string> = {};
-
-    for (const line of content.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith("#")) continue;
-
-        const [key, ...rest] = trimmed.split("=");
-        if (!key || rest.length === 0) continue;
-
-        env[key] = rest.join("=").trim().replace(/^['"]|['"]$/g, "");
-    }
-
-    let regexPatterns;
-
-    const raw = env["CUSTOM_REG_EXP"] || process.env.CUSTOM_REG_EXP!; // raw string from env
-    if (raw != undefined) {
-        const patternStrings = raw.slice(1, -1).split('", "').map(s => s.replace(/^"|"$/g, ''));
-
-            regexPatterns = patternStrings.map(pattern => {
-                try {
-                    return new RegExp(pattern, "g"); // assumes no flags, raw pattern only
-                } catch (e) {
-                    throw new Error(`Invalid regex pattern: ${pattern} — ${e}`);
-                }
-            });
-    }
-
-    const screenshotMode = normalizeScreenshotMode(env["SCREENSHOT_MODE"] || process.env.SCREENSHOT_MODE || defaultConfig.screenshotMode);
-    const screenshots = env["SCREENSHOT"] ? env["SCREENSHOT"].toUpperCase() === "ON" : (process.env.SCREENSHOT ? process.env.SCREENSHOT.toUpperCase() === "ON" : defaultConfig.screenshots);
-
-    const config = {
-        scan: env["SCAN"] ? env["SCAN"].toUpperCase() === "ON" : (process.env.SCAN ? process.env.SCAN.toUpperCase() === "ON" : defaultConfig.scan),
-        outputDir: env["OUTPUT_DIR"] ? env["OUTPUT_DIR"] + "/pages" : (process.env.OUTPUT_DIR ? process.env.OUTPUT_DIR + "/pages" : defaultConfig.outputDir),
-        screenshots: screenshots && screenshotMode !== "off",
+    cachedConfig = {
+        scan: isOn("SCAN", true),
+        outputDir: (env.OUTPUT_DIR || "axe-playwright-report") + "/pages",
+        screenshots: isOn("SCREENSHOT", false) && screenshotMode !== "off",
         screenshotMode,
-        maxScreenshotsPerPage: parseScreenshotLimit(env["MAX_SCREENSHOTS_PER_PAGE"] || process.env.MAX_SCREENSHOTS_PER_PAGE, defaultConfig.maxScreenshotsPerPage),
-        resultMode: normalizeResultMode(env["RESULT_MODE"] || process.env.RESULT_MODE || defaultConfig.resultMode),
+        maxScreenshotsPerPage: parseScreenshotLimit(env.MAX_SCREENSHOTS_PER_PAGE, Number.POSITIVE_INFINITY),
+        resultMode: normalizeResultMode(env.RESULT_MODE || "full"),
         // Passes are stored by default; only the literal value "OFF" drops them
         // (they are the largest, rarely-read slice of an axe result).
-        includePasses: env["INCLUDE_PASSES"] ? env["INCLUDE_PASSES"].toUpperCase() !== "OFF" : (process.env.INCLUDE_PASSES ? process.env.INCLUDE_PASSES.toUpperCase() !== "OFF" : defaultConfig.includePasses),
-        tags: env["TAGS"] ? env["TAGS"].split(",").map(t => t.trim()).filter(Boolean) : (process.env.TAGS ? process.env.TAGS.split(",").map(t => t.trim()).filter(Boolean) : defaultConfig.tags),
-        withRules: env["WITH_RULES"] ? env["WITH_RULES"].split(",").map(t => t.trim()).filter(Boolean) : (process.env.WITH_RULES ? process.env.WITH_RULES.split(",").map(t => t.trim()).filter(Boolean) : defaultConfig.withRules),
-        excludeRules: env["EXCLUDE_RULES"] ? env["EXCLUDE_RULES"].split(",").map(t => t.trim()).filter(Boolean) : (process.env.EXCLUDE_RULES ? process.env.EXCLUDE_RULES.split(",").map(t => t.trim()).filter(Boolean) : defaultConfig.excludeRules),
-        include: env["INCLUDE"] ? env["INCLUDE"].split(",").map(t => t.trim()).filter(Boolean) : (process.env.INCLUDE ? process.env.INCLUDE.split(",").map(t => t.trim()).filter(Boolean) : defaultConfig.include),
-        exclude: env["EXCLUDE"] ? env["EXCLUDE"].split(",").map(t => t.trim()).filter(Boolean) : (process.env.EXCLUDE ? process.env.EXCLUDE.split(",").map(t => t.trim()).filter(Boolean) : defaultConfig.exclude),
-        customRegExp: regexPatterns
+        includePasses: (env.INCLUDE_PASSES || "").toUpperCase() !== "OFF",
+        tags: list("TAGS"),
+        withRules: list("WITH_RULES"),
+        excludeRules: list("EXCLUDE_RULES"),
+        include: list("INCLUDE"),
+        exclude: list("EXCLUDE"),
+        customRegExp: parseCustomRegExp(env.CUSTOM_REG_EXP),
+        viewportSizes: parseViewports(env.VIEWPORTS || ""),
     };
+    return cachedConfig;
+}
 
-    cachedConfig = config;
-    cachedEnvPath = envPath;
-    return config;
+/**
+ * Parses `CUSTOM_REG_EXP`, a list like `["^\/a\d+$", "\/b"]`. An empty value
+ * (or `[]`) means no custom patterns: an empty RegExp would match everywhere.
+ */
+export function parseCustomRegExp(raw: string | undefined): RegExp[] {
+    if (!raw) return [];
+    return raw.slice(1, -1).split('", "')
+        .map(s => s.replace(/^"|"$/g, ''))
+        .filter(Boolean)
+        .map(pattern => {
+            try {
+                return new RegExp(pattern, "g");
+            } catch (e) {
+                throw new Error(`Invalid regex pattern: ${pattern} — ${e}`);
+            }
+        });
+}
+
+/**
+ * Parses the `VIEWPORTS` env value into a name -> size map. The expected format
+ * is a comma-separated list of `name:WIDTHxHEIGHT` entries, e.g.
+ * `mobile:390x844,tablet:768x1024`. `desktop` is reserved (it always means the
+ * test's natural viewport) and is ignored if declared here.
+ */
+export function parseViewports(raw: string): Record<string, { width: number; height: number }> {
+    const map: Record<string, { width: number; height: number }> = {};
+    if (!raw) return map;
+
+    for (const entry of raw.split(",")) {
+        const trimmed = entry.trim();
+        if (!trimmed) continue;
+
+        const separatorIndex = trimmed.indexOf(":");
+        if (separatorIndex === -1) {
+            console.warn(`Invalid VIEWPORTS entry "${trimmed}". Expected "name:WIDTHxHEIGHT" (e.g. mobile:390x844). Skipping.\n`);
+            continue;
+        }
+
+        const name = trimmed.slice(0, separatorIndex).trim().toLowerCase();
+        const size = trimmed.slice(separatorIndex + 1).trim();
+
+        if (!name) continue;
+        if (name === "desktop") {
+            console.warn(`"desktop" is a reserved viewport (the test's natural size) and cannot be redefined in VIEWPORTS. Skipping.\n`);
+            continue;
+        }
+
+        const match = size.match(/^(\d+)\s*[x×]\s*(\d+)$/i);
+        if (!match) {
+            console.warn(`Invalid size "${size}" for viewport "${name}" in VIEWPORTS. Expected WIDTHxHEIGHT (e.g. 390x844). Skipping.\n`);
+            continue;
+        }
+
+        map[name] = { width: Number.parseInt(match[1], 10), height: Number.parseInt(match[2], 10) };
+    }
+
+    return map;
 }
 
 function normalizeScreenshotMode(value: string): "off" | "violations" | "all" {
@@ -325,12 +401,17 @@ async function highlightElement(element: Locator, index: number, color: string) 
     try {
         await element.evaluate((el, args) => {
             el.scrollIntoView({behavior: "auto", block: "center"});
-            el.style.position = "relative"; // Ensure proper placement
+            // Save the inline styles we override; cleanup restores them.
+            if (!el.hasAttribute("data-axe-old-style")) {
+                el.setAttribute("data-axe-old-style", JSON.stringify([el.style.position, el.style.outline]));
+            }
+            // Only static elements need `relative` to anchor the marker; fixed/absolute ones keep their layout.
+            if (getComputedStyle(el).position === "static") el.style.position = "relative";
             el.style.outline = `2px solid ${args.color}`; // Highlight border with given color
 
             // Create a marker div
             const marker = document.createElement("div");
-            marker.id = `marker-${args.index}`;
+            marker.setAttribute("data-axe-marker", "");
             marker.textContent = `${args.index + 1}`; // Numbering
 
             // Style the marker
@@ -355,7 +436,7 @@ async function highlightElement(element: Locator, index: number, color: string) 
     }
 }
 
-function normalizeUrl(url, customPatterns: RegExp[] = []) {
+export function normalizeUrl(url, customPatterns: RegExp[] = []) {
     const urlObj = new URL(url, "http://dummy.base");
     let pathname = urlObj.pathname;
     let isCustomRegExp = false;

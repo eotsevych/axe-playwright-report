@@ -27,22 +27,6 @@ function copyToClipboard(text) {
     }
 }
 
-function setupToggleDetailsButtons() {
-    document.querySelectorAll('.toggle-details').forEach(button => {
-        button.addEventListener('click', function(e) {
-            e.stopPropagation();
-            const nodeDetails = this.nextElementSibling;
-            nodeDetails.classList.toggle('hidden');
-
-            if (nodeDetails.classList.contains('hidden')) {
-                this.innerHTML = '<i class="fas fa-chevron-down"></i> Show failure details';
-            } else {
-                this.innerHTML = '<i class="fas fa-chevron-up"></i> Hide failure details';
-            }
-        });
-    });
-}
-
 function getTabColor(tab) {
     const colors = {
         'violations': 'text-red-600 border-red-500',
@@ -514,6 +498,7 @@ $(document).ready(function() {
     const dashboardSearchInput = document.getElementById('dashboard-search-input');
     const dashboardSearchButton = document.getElementById('dashboard-search-button');
     const filterPriority = document.getElementById('filter-priority');
+    const filterViewport = document.getElementById('filter-viewport');
 
     if (dashboardSearchInput) {
         dashboardSearchInput.addEventListener('input', performSearch);
@@ -526,14 +511,20 @@ $(document).ready(function() {
     if (filterPriority) {
         filterPriority.addEventListener('change', performSearch);
     }
+
+    if (filterViewport) {
+        filterViewport.addEventListener('change', performSearch);
+    }
 });
 
 // Enhanced search and filter functionality
 function performSearch() {
     const searchInput = document.getElementById('dashboard-search-input');
     const filterSelect = document.getElementById('filter-priority');
+    const viewportSelect = document.getElementById('filter-viewport');
     const searchValue = (searchInput && searchInput.value) ? searchInput.value.toLowerCase() : '';
     const filterValue = (filterSelect && filterSelect.value) ? filterSelect.value : 'all';
+    const viewportValue = (viewportSelect && viewportSelect.value) ? viewportSelect.value : 'all';
     const rows = document.querySelectorAll('#sortable-table tbody tr');
     const tableBody = document.getElementById('table-body');
 
@@ -543,6 +534,9 @@ function performSearch() {
         const pageLink = row.querySelector('.url-cell a');
         const pageUrl = pageLink ? pageLink.textContent.toLowerCase() : '';
         const matchesSearch = searchValue === '' || pageUrl.includes(searchValue);
+
+        const rowViewport = row.getAttribute('data-viewport') || 'desktop';
+        const matchesViewport = viewportValue === 'all' || rowViewport === viewportValue;
 
         let matchesFilter = true;
         if (filterValue === 'critical') {
@@ -571,7 +565,7 @@ function performSearch() {
             matchesFilter = incompleteCount > 0;
         }
 
-        if (matchesSearch && matchesFilter) {
+        if (matchesSearch && matchesFilter && matchesViewport) {
             row.style.display = '';
             visibleCount++;
         } else {
@@ -627,12 +621,16 @@ function performSearch() {
 function clearSearchAndFilters() {
     const searchInput = document.getElementById('dashboard-search-input');
     const filterSelect = document.getElementById('filter-priority');
-    
+    const viewportSelect = document.getElementById('filter-viewport');
+
     if (searchInput) {
         searchInput.value = '';
     }
     if (filterSelect) {
         filterSelect.value = 'all';
+    }
+    if (viewportSelect) {
+        viewportSelect.value = 'all';
     }
 
     const paginationControls = document.getElementById('pagination-controls');

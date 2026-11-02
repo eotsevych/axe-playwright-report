@@ -19,14 +19,12 @@ if (command === 'build-report') {
     console.log('Done');
 } else if (command === 'test') {
     const allowFailure = args.includes('--allow-failure');
-    const buildReport = args.includes('--build-report');
-    if (buildReport) {
-        build.main()
-            .then(({reports, stats}) => build.test(allowFailure, false, reports, stats))
-            .catch(fail)
-    } else {
-        build.test(allowFailure)
-    }
+    const prepared = args.includes('--build-report') ? build.main() : Promise.resolve({reports: null, stats: null});
+    prepared
+        .then(({reports, stats}) => {
+            if (build.test(allowFailure, reports, stats)) process.exit(1);
+        })
+        .catch(fail)
 } else {
     if (args.length > 0) console.log(`Unknown command: ${command}\n`);
     console.log('Available commands:');
