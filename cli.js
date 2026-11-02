@@ -19,7 +19,8 @@ if (command === 'build-report') {
     console.log('Done');
 } else if (command === 'test') {
     const allowFailure = args.includes('--allow-failure');
-    const prepared = args.includes('--build-report') ? build.main() : Promise.resolve({reports: null, stats: null});
+    // Builds the dashboard first, as in 1.2.x; --skip-report checks thresholds only.
+    const prepared = args.includes('--skip-report') ? Promise.resolve({reports: null, stats: null}) : build.main();
     prepared
         .then(({reports, stats}) => {
             if (build.test(allowFailure, reports, stats)) process.exit(1);
@@ -33,6 +34,6 @@ if (command === 'build-report') {
     console.log('  test           - Check accessibility baselines');
     console.log('');
     console.log('Usage: npx axe-playwright-report <command>');
-    console.log('       npx axe-playwright-report test [--allow-failure] [--build-report]');
+    console.log('       npx axe-playwright-report test [--allow-failure] [--skip-report]');
     process.exit(1);
 }

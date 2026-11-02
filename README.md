@@ -199,7 +199,7 @@ You can integrate the accessibility checks into your CI/CD pipeline by adding th
 ```bash
 npx axe-playwright-report test
 ```
-This command deduplicates reports and enforces accessibility baselines without generating the full HTML dashboard. Use `npx axe-playwright-report test --build-report` when you also want the dashboard generated during the quality gate.
+This command builds the HTML dashboard and then enforces accessibility baselines. Use `npx axe-playwright-report test --skip-report` to check the baselines only, without generating the dashboard (faster in CI).
 
 It enforces accessibility baselines according provided `VIOLATION_THRESHOLD` and `INCOMPLETE_THRESHOLD`: comma-separated maximum counts in the order **Critical**, **Serious**, **Moderate**, **Minor**. Leave a slot blank to skip that impact (e.g. `0,,5`); a value that is not a number stops with an error.
 For example:
@@ -209,13 +209,13 @@ INCOMPLETE_THRESHOLD=25
 ```
 means that the process will fail if there are more than 10 critical and 10 serious accessibility violations and more than 25 incomplete issues with critical impact level.  
 Arguments `--allow-failure` will allow the process to continue and report failers as warnings.
-Arguments `--build-report` will generate the HTML dashboard before evaluating thresholds.
+Arguments `--skip-report` will check thresholds only, without generating the HTML dashboard.
 
 ## axe-playwright-report CLI
 There are three commands available in the CLI:
 - `build-report`: Generates a dashboard report.
 - `merge-reports`: Merges multiple reports into a single report. This command is integrated into the `build-report` command. As the separate command will be useful when you run tests in parallel using Playwright Sharding.
-- `test`: Check accessibility baselines. Add `--build-report` to generate the dashboard in the same command.
+- `test`: Build the dashboard and check accessibility baselines. Add `--skip-report` to check baselines only.
 
 
 ### Example Report
