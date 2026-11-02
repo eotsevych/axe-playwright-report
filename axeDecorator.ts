@@ -31,7 +31,7 @@ import dotenv from 'dotenv';
  *   }
  * }
  */
-export function axeScan<This, Args extends any[], Return>(...viewportTokens: string[]) {
+export function axeScan<This, Args extends any[], Return>() {
     return function actualDecorator(target: (this: This, ...args: Args) => Promise<Return>) {
         async function scan(this: any, ...args: Args): Promise<Return> {
             const result = await target.apply(this, args);
@@ -45,39 +45,7 @@ export function axeScan<This, Args extends any[], Return>(...viewportTokens: str
                     return result;
                 }
 
-                const viewportsToScan = resolveViewports(viewportTokens);
-                // Remember the current layout so we can restore it after resizing.
-                // `setViewportSize` re-runs CSS media queries without reloading, so
-                // any in-progress form state on the page survives the mobile pass.
-                const originalViewport = page.viewportSize();
-
-                try {
-                    for (const viewport of viewportsToScan) {
-                        if (viewport === "desktop") {
-                            // Desktop scans at the test's natural size regardless of
-                            // where a previous (resized) pass left the viewport.
-                            if (originalViewport) await page.setViewportSize(originalViewport);
-                        } else {
-                            const size = accessibilityConfig.viewportSizes[viewport];
-                            if (!size) {
-                                console.warn(`No resolution configured for viewport "${viewport}". Add it to VIEWPORTS in .env.a11y (e.g. VIEWPORTS=${viewport}:390x844). Skipping.\n`);
-                                continue;
-                            }
-                            if (!originalViewport) {
-                                // A page created with `viewport: null` uses the real
-                                // browser window and cannot be resized/restored.
-                                console.warn(`Cannot scan viewport "${viewport}": the page has no fixed viewport (created with viewport: null), so it cannot be resized. Skipping.\n`);
-                                continue;
-                            }
-                            await page.setViewportSize(size);
-                        }
-
-                        await runAxeScanForViewport(page, accessibilityConfig, viewport);
-                    }
-                } finally {
-                    // Reset the layout without reloading the page.
-                    if (originalViewport) await page.setViewportSize(originalViewport);
-                }
+                await runAxeScan(page, accessibilityConfig);
             }
             return result
         }
@@ -86,32 +54,7 @@ export function axeScan<This, Args extends any[], Return>(...viewportTokens: str
     }
 }
 
-/**
- * Resolves the decorator's viewport tokens into an ordered list of viewports to
- * scan. Desktop is always the default; bare tokens (e.g. `mobile`) add a
- * viewport, and tilde-prefixed tokens (e.g. `~desktop`) remove one.
- *
- *   resolveViewports([])                    -> ["desktop"]
- *   resolveViewports(["mobile"])            -> ["desktop", "mobile"]
- *   resolveViewports(["mobile", "~desktop"]) -> ["mobile"]
- */
-export function resolveViewports(tokens: string[]): string[] {
-    const list: string[] = ["desktop"];
-    for (const rawToken of tokens) {
-        const token = String(rawToken).trim().toLowerCase();
-        if (!token) continue;
-        if (token.startsWith("~")) {
-            const name = token.slice(1).trim();
-            const idx = list.indexOf(name);
-            if (idx !== -1) list.splice(idx, 1);
-        } else if (!list.includes(token)) {
-            list.push(token);
-        }
-    }
-    return list;
-}
-
-async function runAxeScanForViewport(page: Page, accessibilityConfig: any, viewport: string) {
+async function runAxeScan(page: Page, accessibilityConfig: any) {
     let axeBuilder = new AxeBuilder({page});
     if (accessibilityConfig.tags.length > 0) axeBuilder.withTags(accessibilityConfig.tags);
     if (accessibilityConfig.withRules.length > 0) axeBuilder.withRules(accessibilityConfig.withRules);
@@ -127,7 +70,6 @@ async function runAxeScanForViewport(page: Page, accessibilityConfig: any, viewp
 
     const id = randomUUID();
     accessibilityScanResults['id'] = id;
-    accessibilityScanResults['viewport'] = viewport;
 
     let url = normalizeUrl(accessibilityScanResults.url, accessibilityConfig.customRegExp);
     accessibilityScanResults['newUrl'] = url;
@@ -317,7 +259,6 @@ function loadEnvConfig() {
         include: list("INCLUDE"),
         exclude: list("EXCLUDE"),
         customRegExp: parseCustomRegExp(env.CUSTOM_REG_EXP),
-        viewportSizes: parseViewports(env.VIEWPORTS || ""),
     };
     return cachedConfig;
 }
@@ -338,47 +279,6 @@ export function parseCustomRegExp(raw: string | undefined): RegExp[] {
                 throw new Error(`Invalid regex pattern: ${pattern} — ${e}`);
             }
         });
-}
-
-/**
- * Parses the `VIEWPORTS` env value into a name -> size map. The expected format
- * is a comma-separated list of `name:WIDTHxHEIGHT` entries, e.g.
- * `mobile:390x844,tablet:768x1024`. `desktop` is reserved (it always means the
- * test's natural viewport) and is ignored if declared here.
- */
-export function parseViewports(raw: string): Record<string, { width: number; height: number }> {
-    const map: Record<string, { width: number; height: number }> = {};
-    if (!raw) return map;
-
-    for (const entry of raw.split(",")) {
-        const trimmed = entry.trim();
-        if (!trimmed) continue;
-
-        const separatorIndex = trimmed.indexOf(":");
-        if (separatorIndex === -1) {
-            console.warn(`Invalid VIEWPORTS entry "${trimmed}". Expected "name:WIDTHxHEIGHT" (e.g. mobile:390x844). Skipping.\n`);
-            continue;
-        }
-
-        const name = trimmed.slice(0, separatorIndex).trim().toLowerCase();
-        const size = trimmed.slice(separatorIndex + 1).trim();
-
-        if (!name) continue;
-        if (name === "desktop") {
-            console.warn(`"desktop" is a reserved viewport (the test's natural size) and cannot be redefined in VIEWPORTS. Skipping.\n`);
-            continue;
-        }
-
-        const match = size.match(/^(\d+)\s*[x×]\s*(\d+)$/i);
-        if (!match) {
-            console.warn(`Invalid size "${size}" for viewport "${name}" in VIEWPORTS. Expected WIDTHxHEIGHT (e.g. 390x844). Skipping.\n`);
-            continue;
-        }
-
-        map[name] = { width: Number.parseInt(match[1], 10), height: Number.parseInt(match[2], 10) };
-    }
-
-    return map;
 }
 
 function normalizeScreenshotMode(value: string): "off" | "violations" | "all" {

@@ -127,8 +127,8 @@ test('dashboard table shows correct per-impact element and rule counts', async (
         await mod.main();
 
         const row = tableRowText(fs.readFileSync(path.join(dir, 'index.html'), 'utf8'));
-        // page  viewport  critical serious moderate minor  vRules ... iRules ... pRules
-        assert.match(row, /\/cart\s+desktop\s+1\s+2\s+1\s+1\s+2\s+Violations\s+1\s+Incomplete\s+1\s+Passes/);
+        // page  critical serious moderate minor  vRules ... iRules ... pRules
+        assert.match(row, /\/cart\s+1\s+2\s+1\s+1\s+2\s+Violations\s+1\s+Incomplete\s+1\s+Passes/);
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
     }

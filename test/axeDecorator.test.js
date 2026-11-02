@@ -14,39 +14,7 @@ try {
     throw new Error('Run `npm run build` before the tests: ' + err.message);
 }
 
-const { resolveViewports, parseViewports, normalizeUrl, compactAxeResult, parseCustomRegExp } = decorator;
-
-test('resolveViewports defaults to desktop only', () => {
-    assert.deepStrictEqual(resolveViewports([]), ['desktop']);
-});
-
-test('resolveViewports appends bare tokens after desktop', () => {
-    assert.deepStrictEqual(resolveViewports(['mobile']), ['desktop', 'mobile']);
-    assert.deepStrictEqual(resolveViewports(['mobile', 'tablet']), ['desktop', 'mobile', 'tablet']);
-});
-
-test('resolveViewports removes viewports with a ~ prefix', () => {
-    assert.deepStrictEqual(resolveViewports(['mobile', '~desktop']), ['mobile']);
-});
-
-test('resolveViewports ignores duplicates, casing and blank tokens', () => {
-    assert.deepStrictEqual(resolveViewports(['MOBILE', ' mobile ', '']), ['desktop', 'mobile']);
-});
-
-test('parseViewports parses name:WIDTHxHEIGHT entries', () => {
-    assert.deepStrictEqual(parseViewports('mobile:390x844,tablet:768x1024'), {
-        mobile: { width: 390, height: 844 },
-        tablet: { width: 768, height: 1024 },
-    });
-});
-
-test('parseViewports skips the reserved "desktop" name and malformed sizes', () => {
-    assert.deepStrictEqual(parseViewports('desktop:100x100,bad,mobile:390xNaN'), {});
-});
-
-test('parseViewports returns an empty map for empty input', () => {
-    assert.deepStrictEqual(parseViewports(''), {});
-});
+const { normalizeUrl, compactAxeResult, parseCustomRegExp } = decorator;
 
 test('normalizeUrl replaces numeric id segments with :id', () => {
     assert.strictEqual(normalizeUrl('http://localhost/orders/12345'), '/orders/:id');

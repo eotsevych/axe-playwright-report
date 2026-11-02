@@ -219,7 +219,7 @@ function buildReportStats(reports, affectedIndex = null) {
 
         tableRows.push({
             id: report.id,
-            viewport: report.viewport || 'desktop',
+            viewport: report.viewport,
             pagePath: report.pagePath || report.id,
             critical_elements,
             serious_elements,
@@ -938,7 +938,8 @@ function viewportRank(viewport) {
 }
 
 function renderViewportBadge(viewport) {
-    const name = viewport || 'desktop';
+    if (!viewport) return '';  // only multi-viewport scans (not released yet) record one
+    const name = viewport;
     return `<span class="viewport-badge viewport-badge--${escapeHTML(name)}" title="Scanned viewport">${escapeHTML(name)}</span>`;
 }
 
