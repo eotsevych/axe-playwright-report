@@ -15,7 +15,9 @@
     "build": "tsc && cp buildReport.js dist/",
     "prepublishOnly": "npm run build",
     "build-report": "build-report",
-    "test": "echo \"No tests yet\" && exit 0"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.typecheck.json",
+    "benchmark:report": "node scripts/benchmark-report.js",
+    "test": "node --test test/*.test.js"
   },
   "files": [
     "dist",
@@ -42,14 +44,16 @@
     "url": "git+https://github.com/eotsevych/axe-playwright-report.git"
   },
   "peerDependencies": {
-    "@playwright/test": ">=1.44.0",
-    "@axe-core/playwright": ">=4.10.0"
+    "@axe-core/playwright": ">=4.10.0",
+    "@playwright/test": ">=1.44.0"
+  },
+  "dependencies": {
+    "dotenv": "^16.3.1"
   },
   "devDependencies": {
-    "@axe-core/playwright": "^4.12.1",
-    "@playwright/test": "^1.60.1",
+    "@axe-core/playwright": "^4.14.0",
+    "@playwright/test": "^1.64.1",
     "@types/node": "^20.8.0",
-    "dotenv": "^16.3.1",
     "typescript": "^5.2.2"
   }
 }
